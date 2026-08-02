@@ -1,0 +1,38 @@
+name: entity-backfill
+
+# Builds the entity/graph layer from memory_notes already in the database.
+# No Gmail access, no LLM key, no email re-parse — pure DB transform.
+# Run once after deploying the entity layer; safe to re-run.
+on:
+  workflow_dispatch:
+    inputs:
+      user_email:
+        description: 'Scope to one user email (blank = all)'
+        required: false
+        default: ''
+
+concurrency:
+  group: entity-backfill-${{ github.event.inputs.user_email }}
+  cancel-in-progress: false
+
+jobs:
+  entity-backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: ingestion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install
+        working-directory: worker
+        run: npm install --omit=dev
+      - name: Run entity backfill
+        working-directory: worker
+        env:
+          MODE: entity-backfill
+          ONLY_USER: ${{ github.event.inputs.user_email }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: npm start

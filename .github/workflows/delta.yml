@@ -1,0 +1,52 @@
+name: gmail-delta
+
+# Differential sync across all connected accounts (rows in sync_state).
+#
+# CAVEAT: GitHub cron is best-effort — runs can be delayed 15-30+ min or skipped
+# under load, and the schedule auto-DISABLES after 60 days of repo inactivity.
+# For reliable 15-min freshness, drive workflow_dispatch from Supabase pg_cron
+# or Trigger.dev/QStash instead; the job body stays identical.
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: delta-all
+  cancel-in-progress: false
+
+jobs:
+  delta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ingestion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install
+        working-directory: worker
+        run: npm install --omit=dev
+      - name: Run delta
+        working-directory: worker
+        env:
+          MODE: delta
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          # LLM keys are per-user now, read from Redis by the worker.
+          # This secret decrypts them (shared with the app).
+          ENTWIN_KEY_SECRET: ${{ secrets.ENTWIN_KEY_SECRET }}
+          # Optional embedding-model overrides (Option A). Safe to omit —
+          # the worker falls back to sensible defaults if these are unset.
+          CLAUDE_EMBED_MODEL: ${{ secrets.CLAUDE_EMBED_MODEL }}
+          OPENAI_EMBED_MODEL: ${{ secrets.OPENAI_EMBED_MODEL }}
+          GEMINI_EMBED_MODEL: ${{ secrets.GEMINI_EMBED_MODEL }}
+          # Perf tuning (optional). Concurrency = emails processed in parallel.
+          # Default 6 if unset. Lower it if you still hit rate limits.
+          INGEST_CONCURRENCY: ${{ vars.INGEST_CONCURRENCY }}
+        run: npm start
