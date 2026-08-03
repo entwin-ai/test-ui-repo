@@ -73,7 +73,7 @@ async function main() {
     printQRInTerminal: false,
     markOnlineOnConnect: false,
     syncFullHistory: true,
-    browser: Browsers.macOS('Desktop'),
+    browser: Browsers.ubuntu('Chrome'),
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -84,23 +84,33 @@ async function main() {
     fail('timed out waiting for you to enter the pairing code on your phone');
   }, PAIR_TIMEOUT_MS);
 
-  sock.ev.on('connection.update', async (u) => {
-    if (u.qr && !codeRequested) {
-      // Handshake done — safe to request a pairing code now.
-      codeRequested = true;
-      try {
-        const code = await sock.requestPairingCode(WA_PHONE);
-        const pretty = code.match(/.{1,4}/g)?.join('-') ?? code;
-        console.log('\n==================================================');
-        console.log(`  WhatsApp pairing code for ${USER_EMAIL}: ${pretty}`);
-        console.log('  On your phone: WhatsApp → Settings → Linked devices');
-        console.log('  → Link a device → Link with phone number → enter the code');
-        console.log('==================================================\n');
-      } catch (e) {
-        clearTimeout(hardTimer);
-        fail(`WhatsApp rejected the pairing request: ${e.message}`);
-      }
+  // Request the pairing code up front — do NOT wait for a `qr` event. For
+  // phone-number pairing the socket never needs a QR, and waiting for one lets
+  // the server close the connection (status 428/515) before we ever ask.
+  async function requestCode() {
+    if (codeRequested) return;
+    codeRequested = true;
+    try {
+      const code = await sock.requestPairingCode(WA_PHONE);
+      const pretty = code.match(/.{1,4}/g)?.join('-') ?? code;
+      console.log('\n==================================================');
+      console.log(`  WhatsApp pairing code for ${USER_EMAIL}: ${pretty}`);
+      console.log('  On your phone: WhatsApp → Settings → Linked devices');
+      console.log('  → Link a device → Link with phone number → enter the code');
+      console.log('==================================================\n');
+    } catch (e) {
+      clearTimeout(hardTimer);
+      fail(`WhatsApp rejected the pairing request: ${e.message}`);
     }
+  }
+
+  // Ask for the code once the socket exists and isn't already registered.
+  // A small delay lets the initial WS handshake settle before the request.
+  if (!sock.authState.creds.registered) {
+    setTimeout(requestCode, 3000);
+  }
+
+  sock.ev.on('connection.update', async (u) => {
     if (u.connection === 'open') {
       clearTimeout(hardTimer);
       await flush().catch(() => {});
@@ -111,8 +121,9 @@ async function main() {
     }
     if (u.connection === 'close') {
       const code = u.lastDisconnect?.error?.output?.statusCode;
-      // A close right after the handshake is normal before the code is entered;
-      // only treat it as fatal if we never got to request a code.
+      // Once the code has been requested, a 428/515 close is a normal restart
+      // in the pairing handshake — reconnect instead of failing. Only fatal if
+      // we never got to request a code at all.
       if (!codeRequested) {
         clearTimeout(hardTimer);
         fail(`connection closed before pairing (status ${code ?? 'unknown'}) — try again`);
