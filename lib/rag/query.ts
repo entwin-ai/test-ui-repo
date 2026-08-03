@@ -13,6 +13,7 @@ export interface AskSource {
   url: string | null
   date: string | null
   urgency: string | null
+  channel: string | null // 'email' | 'whatsapp' — which connector this came from
   similarity: number
 }
 
@@ -67,8 +68,11 @@ export async function ask(
     ? [...(matches as any[])].sort((a, b) => (a.note_date < b.note_date ? 1 : -1))
     : (matches as any[])
 
+  // Label each context block with its channel (email / WhatsApp) so the model
+  // can attribute cross-channel answers ("you agreed this over WhatsApp").
+  const chan = (m: any) => (m.source === 'whatsapp' ? 'WhatsApp' : 'email')
   const context = ordered
-    .map((m: any, i: number) => `[${i + 1}] (${m.note_date}, urgency=${m.urgency})\n${m.content}`)
+    .map((m: any, i: number) => `[${i + 1}] (${chan(m)}, ${m.note_date}, urgency=${m.urgency})\n${m.content}`)
     .join('\n\n')
 
   const recencyHint = recencyBoost
@@ -77,7 +81,7 @@ export async function ask(
 
   const answer = await provider.chatText({
     system:
-      'Answer the question using ONLY the provided email memory notes. Cite sources as [n]. If the notes do not contain the answer, say so plainly.' +
+      'Answer the question using ONLY the provided memory notes, which come from the user\'s email AND WhatsApp. Each note is tagged with its channel. Cite sources as [n]. When it matters, mention which channel something came from. If the notes do not contain the answer, say so plainly.' +
       recencyHint,
     user: `Question: ${question}\n\nMemory notes:\n${context}`,
     maxTokens: 1024,
@@ -91,7 +95,14 @@ export async function ask(
     if (seen.has(key)) continue
     seen.add(key)
     n += 1
-    sources.push({ n, url: m.source_url, date: m.note_date, urgency: m.urgency, similarity: m.score })
+    sources.push({
+      n,
+      url: m.source_url,
+      date: m.note_date,
+      urgency: m.urgency,
+      channel: m.source ?? 'email',
+      similarity: m.score,
+    })
   }
 
   return { answer, sources }
@@ -125,13 +136,14 @@ export async function askEntity(
     return { answer: "I don't have anything in your email memory about that yet.", sources: [] }
   }
 
+  const chan = (m: any) => (m.source === 'whatsapp' ? 'WhatsApp' : 'email')
   const context = (matches as any[])
-    .map((m, i) => `[${i + 1}] (${m.note_date}, urgency=${m.urgency})\n${m.content}`)
+    .map((m, i) => `[${i + 1}] (${chan(m)}, ${m.note_date}, urgency=${m.urgency})\n${m.content}`)
     .join('\n\n')
 
   const answer = await provider.chatText({
     system:
-      'You are summarising what the user knows about a specific person or organisation, using ONLY the provided email memory notes. Cite sources as [n]. If the notes do not answer, say so plainly.',
+      'You are summarising what the user knows about a specific person or organisation, drawing on BOTH their email and WhatsApp memory notes (each tagged with its channel). Cite sources as [n]. If the notes do not answer, say so plainly.',
     user: `Question: ${question}\n\nMemory notes:\n${context}`,
     maxTokens: 1024,
   })
@@ -144,7 +156,14 @@ export async function askEntity(
     if (seen.has(key)) continue
     seen.add(key)
     n += 1
-    sources.push({ n, url: m.source_url, date: m.note_date, urgency: m.urgency, similarity: m.similarity })
+    sources.push({
+      n,
+      url: m.source_url,
+      date: m.note_date,
+      urgency: m.urgency,
+      channel: m.source ?? 'email',
+      similarity: m.similarity,
+    })
   }
 
   return { answer, sources }

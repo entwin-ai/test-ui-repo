@@ -9,10 +9,16 @@ import {
   currentHistoryId,
 } from './lib/gmail.js';
 import { ingestMessage } from './pipeline/ingest.js';
+import { ingestWhatsappBackfill, ingestWhatsappDelta } from './pipeline/whatsapp.js';
+import { captureWhatsapp } from './pipeline/whatsapp-capture.js';
 import { backfillEntities } from './entity-backfill.js';
 import { runPool } from './lib/pool.js';
 
-const MODE = process.env.MODE || 'delta'; // backfill | delta | entity-backfill
+// backfill | delta                    -> Gmail
+// whatsapp-sync                       -> WhatsApp: capture (drain offline) + vectorize, one bounded run
+// whatsapp-backfill | whatsapp-delta  -> WhatsApp vectorize-only (advanced/manual)
+// entity-backfill                     -> rebuild entity layer from existing notes
+const MODE = process.env.MODE || 'delta';
 const CONCURRENCY = Math.max(1, parseInt(process.env.INGEST_CONCURRENCY || '6', 10));
 const ONLY_USER = process.env.ONLY_USER || null; // optional single-user run
 const ONLY_CARD = process.env.ONLY_CARD || null; // optional single-card run
@@ -20,8 +26,9 @@ const ONLY_CARD = process.env.ONLY_CARD || null; // optional single-card run
 // The app writes a sync_state row when a Gmail card connects. That's the
 // worker's enumeration source (Redis keys are hashed, so not enumerable back to
 // user+card). Each row also holds this account's backfill/delta cursors.
-async function accounts() {
+async function accounts(channel) {
   let q = admin.from('sync_state').select('*');
+  if (channel) q = q.eq('channel', channel);
   if (ONLY_USER) q = q.eq('user_email', ONLY_USER);
   if (ONLY_CARD) q = q.eq('card_id', ONLY_CARD);
   const { data, error } = await q;
@@ -112,7 +119,7 @@ async function runDelta(acct, accessToken, provider) {
 }
 
 async function main() {
-  // Entity backfill reuses existing memory_notes — no Gmail token, no LLM key,
+  // Entity backfill reuses existing memory_notes — no token, no LLM key,
   // no per-account loop needed. Handle it up front and return.
   if (MODE === 'entity-backfill') {
     console.log('MODE=entity-backfill (building entity layer from existing notes)');
@@ -120,8 +127,75 @@ async function main() {
     return;
   }
 
-  const list = await accounts();
-  console.log(`MODE=${MODE} accounts=${list.length}`);
+  // ---- WhatsApp modes -------------------------------------------------------
+  // whatsapp-sync is the batch-hourly path: for each linked account, open a
+  // short-lived socket to DRAIN the offline backlog into whatsapp_message
+  // (capture), then vectorize the freshly captured rows in the SAME run. No
+  // socket is held between runs — this is what makes WhatsApp work in bounded
+  // GitHub Actions jobs instead of an always-on host.
+  if (MODE === 'whatsapp-sync') {
+    const list = await accounts('whatsapp');
+    console.log(`MODE=whatsapp-sync whatsapp-accounts=${list.length}`);
+    for (const acct of list) {
+      try {
+        const llmConfig = await getLlmConfig(acct.user_email);
+        if (!llmConfig) {
+          console.log(`[${acct.user_email}/${acct.card_id}] no LLM key set — skipping`);
+          continue;
+        }
+        const provider = makeProvider(llmConfig);
+
+        // 1. CAPTURE: drain WhatsApp's offline sync into the ledger.
+        const { captured, notPaired } = await captureWhatsapp(acct);
+        if (notPaired) continue; // needs one-time pairing first
+        console.log(`[${acct.user_email}/wa] captured ${captured} new rows`);
+
+        // 2. VECTORIZE: turn unprocessed rows into notes/entities/embeddings.
+        //    First run does the 1-month backfill; later runs do delta. Both only
+        //    touch rows with processed_at IS NULL, so this is safe to run every
+        //    hour regardless of how many rows capture produced.
+        if (!acct.backfill_done) {
+          await ingestWhatsappBackfill(acct, provider, runPool, CONCURRENCY);
+        } else {
+          await ingestWhatsappDelta(acct, provider, runPool, CONCURRENCY);
+        }
+        console.log(`[${acct.user_email}/${acct.card_id}] whatsapp-sync done`);
+      } catch (err) {
+        console.error(`[${acct.user_email}/${acct.card_id}] whatsapp-sync failed:`, err.message);
+      }
+    }
+    return;
+  }
+
+  // Vectorize-only WhatsApp modes (no capture) — for manual re-processing of
+  // already-captured rows, or if capture is driven from elsewhere.
+  if (MODE === 'whatsapp-backfill' || MODE === 'whatsapp-delta') {
+    const list = await accounts('whatsapp');
+    console.log(`MODE=${MODE} whatsapp-accounts=${list.length}`);
+    for (const acct of list) {
+      try {
+        const llmConfig = await getLlmConfig(acct.user_email);
+        if (!llmConfig) {
+          console.log(`[${acct.user_email}/${acct.card_id}] no LLM key set — skipping`);
+          continue;
+        }
+        const provider = makeProvider(llmConfig);
+        if (MODE === 'whatsapp-backfill') {
+          await ingestWhatsappBackfill(acct, provider, runPool, CONCURRENCY);
+        } else {
+          await ingestWhatsappDelta(acct, provider, runPool, CONCURRENCY);
+        }
+        console.log(`[${acct.user_email}/${acct.card_id}] ${MODE} done`);
+      } catch (err) {
+        console.error(`[${acct.user_email}/${acct.card_id}] wa account failed:`, err.message);
+      }
+    }
+    return;
+  }
+
+  // ---- Gmail modes (backfill | delta) --------------------------------------
+  const list = await accounts('gmail');
+  console.log(`MODE=${MODE} gmail-accounts=${list.length}`);
   for (const acct of list) {
     try {
       const llmConfig = await getLlmConfig(acct.user_email);

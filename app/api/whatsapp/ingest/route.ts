@@ -1,21 +1,19 @@
 import { NextResponse } from "next/server"
 import { requireUser } from "@/lib/whatsapp/route-helpers"
-import { status, WA_CARD_ID } from "@/lib/whatsapp/service"
+import { status } from "@/lib/whatsapp/service"
 
 export const dynamic = "force-dynamic"
 
 /**
- * POST /api/whatsapp/sync — "Sync now".
+ * POST /api/whatsapp/ingest
  *
- * Triggers an on-demand run of the hourly whatsapp-sync workflow (capture +
- * vectorize) for this user, instead of waiting for the top of the hour.
- * Fire-and-forget; returns current status. If GitHub dispatch isn't configured,
- * it's a no-op that just returns status (the cron still covers it).
+ * Nudge an immediate capture+vectorize run after the user reports they've
+ * entered the pairing code, rather than waiting for the hourly cron. Same effect
+ * as /sync; kept as a distinct endpoint the UI calls once post-pairing.
  */
 export async function POST() {
   const auth = await requireUser()
   if ("error" in auth) return auth.error
-
   if (process.env.GH_REPO && process.env.GH_DISPATCH_TOKEN) {
     fetch(
       `https://api.github.com/repos/${process.env.GH_REPO}/actions/workflows/whatsapp-sync.yml/dispatches`,
@@ -30,5 +28,5 @@ export async function POST() {
       },
     ).catch(() => {})
   }
-  return NextResponse.json({ dispatched: true, card: WA_CARD_ID, ...(await status(auth.email)) })
+  return NextResponse.json({ status: "sync queued", ...(await status(auth.email)) }, { status: 202 })
 }

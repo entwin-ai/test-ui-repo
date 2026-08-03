@@ -51,3 +51,34 @@ urgent = true ONLY for a real pending action or deadline a normal update wouldn'
   await logCost(userEmail, provider, 'updates_summary', usage);
   return JSON.parse(text);
 }
+
+// ---------------------------------------------------------------------------
+// WhatsApp variant. Produces the SAME Memory Note schema as writeNoteAndEntities
+// so notes from chat and email are structurally identical and unify into the
+// same entity graph + RAG index. Only the framing differs: a WhatsApp "message"
+// is a single chat turn (often short, informal, part of an ongoing thread with
+// one person or a group), not a subject-lined email.
+// ---------------------------------------------------------------------------
+export async function writeChatNoteAndEntities(provider, userEmail, { chatName, sender, body, date, isGroup }) {
+  const system = `You read ONE WhatsApp message (a single chat turn) and return a Memory Note as strict JSON, no prose, no markdown.
+Context: this is informal chat, possibly part of an ongoing conversation. "${isGroup ? 'This is a group chat.' : 'This is a 1:1 chat.'}"
+Schema:
+{
+  "raw_summary": string,              // one line: what this message conveys
+  "urgency": "critical"|"high"|"medium"|"low",
+  "life_domain": "personal"|"professional",
+  "action": string[],                 // subset of ["respond","give","schedule","decision","await","none","blank"]; "none"/"blank" stand alone
+  "free_text": string,
+  "confidentiality": "yes"|"no"|"blank",
+  "related_entities": string[]        // canonical names of people/orgs this message is about; exclude the account owner. Use real names when the sender/chat name gives one.
+}`;
+  const { text, usage } = await provider.chatJSON({
+    system,
+    user: `Date: ${date}\nChat: ${chatName || sender}\nFrom: ${sender}\n\n${body}`,
+    maxTokens: 1000,
+  });
+  await logCost(userEmail, provider, 'write_chat_note_and_entities', usage);
+  const parsed = JSON.parse(text);
+  const related = Array.isArray(parsed.related_entities) ? parsed.related_entities : [];
+  return { note: parsed, related };
+}

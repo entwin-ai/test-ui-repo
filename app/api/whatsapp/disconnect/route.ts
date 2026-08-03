@@ -8,5 +8,5 @@ export async function POST() {
   const auth = await requireUser()
   if ("error" in auth) return auth.error
   await disconnect(auth.email)
-  return NextResponse.json(status(auth.email))
+  return NextResponse.json(await status(auth.email))
 }

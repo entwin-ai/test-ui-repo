@@ -58,6 +58,16 @@ interface GmailScan {
   sentCount: number
 }
 
+interface WaStatus {
+  state: 'disconnected' | 'pairing' | 'connected'
+  linked?: boolean
+  totalMessages?: number
+  processedMessages?: number
+  chats?: number
+  earliest?: string | null
+  latest?: string | null
+}
+
 interface Connector {
   name: string
   service: string | null
@@ -71,6 +81,8 @@ interface Connector {
   // Local UI state for the Gmail read/parse flow.
   scanning?: boolean
   scan?: GmailScan | null
+  // WhatsApp live state (real Baileys backend).
+  wa?: WaStatus | null
 }
 
 const INITIAL_CONNECTORS: Connector[] = [
@@ -79,7 +91,7 @@ const INITIAL_CONNECTORS: Connector[] = [
   { name: 'Google Drive — Personal', service: 'drive', icon: 'drive', desc: 'Document ingestion for the vault.', connected: false, connectedEmail: null },
   { name: 'Google Drive — Professional', service: 'drive', icon: 'drive', desc: 'Document ingestion for the vault.', connected: false, connectedEmail: null },
   { name: 'Google Calendar', service: null, icon: 'calendar', desc: 'Meeting and scheduling context.', connected: false, connectedEmail: null },
-  { name: 'WhatsApp', service: null, code: 'WA', desc: 'Personal messages, facet-decomposed.', connected: false, connectedEmail: null },
+  { name: 'WhatsApp', service: 'whatsapp', code: 'WA', desc: 'Personal messages, vectorized into cross-channel memory.', connected: false, connectedEmail: null, wa: null },
   { name: 'Telegram', service: null, code: 'TG', desc: 'Personal messages, facet-decomposed.', connected: false, connectedEmail: null },
   { name: 'Slack', service: null, code: 'SL', desc: 'Work channel ingestion.', connected: false, connectedEmail: null },
   { name: 'Browser history', service: null, code: 'BH', desc: 'Search activity as raw source.', connected: false, connectedEmail: null },
@@ -262,7 +274,7 @@ function ChatView({ currentModel, resetKey }: { currentModel: string; resetKey: 
         {pending && (
           <div className="msg assistant">
             <div className="role-label">Entwin</div>
-            <div className="bubble">Searching your vault\u2026</div>
+            <div className="bubble">Searching your vault…</div>
           </div>
         )}
       </div>
@@ -297,25 +309,220 @@ function ChatView({ currentModel, resetKey }: { currentModel: string; resetKey: 
   )
 }
 
+/* ---------------- WhatsApp connect popup ---------------- */
+
+type WaModalPhase = 'input' | 'submitting' | 'pairing' | 'connected' | 'error'
+
+function WhatsAppModal({
+  onClose,
+  onLinked,
+}: {
+  onClose: () => void
+  onLinked: () => void
+}) {
+  const [phase, setPhase] = useState<WaModalPhase>('input')
+  const [phone, setPhone] = useState('')
+  const [via, setVia] = useState<'workflow' | 'local' | null>(null)
+  const [runsUrl, setRunsUrl] = useState<string | null>(null)
+  const [instruction, setInstruction] = useState<string>('')
+  const [error, setError] = useState<string | null>(null)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current)
+    }
+  }, [])
+
+  const digits = phone.replace(/\D/g, '')
+  const valid = digits.length >= 8 && digits.length <= 15
+
+  const submit = async () => {
+    if (!valid) {
+      setError('Enter your number in international format including the ISD code, e.g. +1 312 555 1234')
+      return
+    }
+    setError(null)
+    setPhase('submitting')
+    try {
+      const res = await fetch('/api/whatsapp/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: digits }),
+      })
+      const raw = await res.text()
+      let payload: any = {}
+      try {
+        payload = raw ? JSON.parse(raw) : {}
+      } catch {
+        /* ignore */
+      }
+      if (!res.ok) throw new Error(payload.error || `Connect failed (${res.status})`)
+      setVia(payload.via ?? 'workflow')
+      setRunsUrl(payload.runsUrl ?? null)
+      setInstruction(payload.message ?? '')
+      setPhase('pairing')
+      startPolling()
+    } catch (e) {
+      setError((e as Error).message)
+      setPhase('error')
+    }
+  }
+
+  const startPolling = () => {
+    if (pollRef.current) clearInterval(pollRef.current)
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch('/api/whatsapp/status')
+        if (!res.ok) return
+        const st = await res.json()
+        if (st.linked || st.state === 'connected') {
+          if (pollRef.current) clearInterval(pollRef.current)
+          setPhase('connected')
+          finishLinked()
+        }
+      } catch {
+        /* transient — keep polling */
+      }
+    }, 4000)
+  }
+
+  const finishLinked = () => {
+    // Nudge an immediate capture+vectorize run rather than waiting for the hour.
+    fetch('/api/whatsapp/ingest', { method: 'POST' }).catch(() => {})
+    setTimeout(() => {
+      onLinked()
+      onClose()
+    }, 1600)
+  }
+
+  return (
+    <div className="wa-overlay" role="dialog" aria-modal="true" aria-label="Connect WhatsApp">
+      <div className="wa-window">
+        <div className="wa-head">
+          <div className="wa-badge">WA</div>
+          <div className="wa-head-title">Connect WhatsApp</div>
+          <button className="wa-close" aria-label="Close" onClick={onClose}>
+            ×
+          </button>
+        </div>
+
+        {phase === 'input' || phase === 'submitting' || phase === 'error' ? (
+          <div className="wa-body">
+            <p className="wa-lead">
+              Enter your WhatsApp number, including the ISD / country code. Entwin links as a device on your
+              own account (like WhatsApp Web) and then ingests messages once an hour \u2014 no app stays
+              connected in the background.
+            </p>
+            <label className="wa-label" htmlFor="wa-phone">
+              Phone number
+            </label>
+            <input
+              id="wa-phone"
+              className="wa-input"
+              type="tel"
+              inputMode="tel"
+              autoFocus
+              placeholder="+1 312 555 1234"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && valid && phase !== 'submitting') submit()
+              }}
+              disabled={phase === 'submitting'}
+            />
+            {error && <div className="wa-error">{error}</div>}
+            <div className="wa-actions">
+              <button className="wa-btn ghost" onClick={onClose} disabled={phase === 'submitting'}>
+                Cancel
+              </button>
+              <button className="wa-btn primary" onClick={submit} disabled={!valid || phase === 'submitting'}>
+                {phase === 'submitting' ? 'Starting…' : 'Start pairing'}
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {phase === 'pairing' ? (
+          <div className="wa-body">
+            {via === 'local' ? (
+              <>
+                <p className="wa-lead">Run this once to link the device, then enter the printed code on your phone:</p>
+                <pre className="wa-cmd">{instruction}</pre>
+              </>
+            ) : (
+              <>
+                <p className="wa-lead">
+                  Pairing has started in a background job. Open its log, copy the 8-character pairing code, and
+                  enter it on your phone: WhatsApp → Settings → Linked devices → Link with phone number.
+                </p>
+                {runsUrl && (
+                  <a className="wa-link" href={runsUrl} target="_blank" rel="noreferrer">
+                    Open the pairing job ↗
+                  </a>
+                )}
+              </>
+            )}
+            <div className="wa-waiting">
+              <span className="wa-spinner" /> Waiting for the device to link…
+            </div>
+            <p className="wa-fineprint">
+              Once linked, Entwin ingests your last 30 days of messages, then batches new ones every hour. This
+              window updates automatically when pairing completes.
+            </p>
+          </div>
+        ) : null}
+
+        {phase === 'connected' ? (
+          <div className="wa-body wa-success">
+            <div className="wa-check">✓</div>
+            <div className="wa-success-title">WhatsApp linked</div>
+            <p className="wa-fineprint">
+              Ingesting the last 30 days now. New messages sync every hour and feed the same memory as your
+              email.
+            </p>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 /* ---------------- Connectors view ---------------- */
 
 function ConnectorsView({
   connectors,
   setConnectors,
   runGmailScan,
+  openWhatsApp,
   notice,
   clearNotice,
 }: {
   connectors: Connector[]
   setConnectors: React.Dispatch<React.SetStateAction<Connector[]>>
   runGmailScan: (cardId: NonNullable<Connector['cardId']>) => void
+  openWhatsApp: () => void
   notice: string | null
   clearNotice: () => void
 }) {
   const isGmail = (c: Connector) => c.service === 'gmail' && !!c.cardId
+  const isWhatsApp = (c: Connector) => c.service === 'whatsapp'
 
   const toggle = (idx: number) => {
     const c = connectors[idx]
+
+    // WhatsApp: open the phone-number popup (connect) or disconnect the link.
+    if (isWhatsApp(c)) {
+      if (c.connected) {
+        fetch('/api/whatsapp/disconnect', { method: 'POST' }).catch(() => {})
+        setConnectors((prev) =>
+          prev.map((x, i) => (i === idx ? { ...x, connected: false, connectedEmail: null, wa: null } : x)),
+        )
+        return
+      }
+      openWhatsApp()
+      return
+    }
 
     // Gmail cards use the real OAuth + read/parse backend.
     if (isGmail(c)) {
@@ -360,15 +567,26 @@ function ConnectorsView({
     <div id="connectors-grid">
       {connectors.map((c, idx) => {
         const gmail = isGmail(c)
+        const whatsapp = isWhatsApp(c)
         let statusText: string
-        if (c.connected) {
+        if (whatsapp && c.wa) {
+          if (c.wa.state === 'pairing') statusText = 'Pairing — enter code on phone'
+          else if (c.wa.state === 'connected') statusText = 'Linked · syncs hourly'
+          else statusText = 'Not connected'
+        } else if (c.connected) {
           statusText = c.connectedEmail ? `Connected as ${c.connectedEmail}` : 'Connected'
         } else {
           statusText = 'Not connected'
         }
 
         // Buttons: Gmail scanning shows a disabled "Reading…" state.
-        const btnLabel = c.scanning ? 'Reading…' : c.connected ? 'Disconnect' : 'Connect'
+        const btnLabel = c.scanning
+          ? 'Reading…'
+          : whatsapp && c.wa?.state === 'pairing'
+          ? 'Pairing…'
+          : c.connected
+          ? 'Disconnect'
+          : 'Connect'
 
         return (
           <div className="connector-card" key={idx}>
@@ -393,6 +611,17 @@ function ConnectorsView({
                     <span>Sent read: {c.scan.sentCount.toLocaleString()} messages</span>
                   </>
                 ) : null}
+              </div>
+            )}
+
+            {/* WhatsApp ingestion summary — captured + vectorized counts. */}
+            {whatsapp && c.wa && (c.wa.state === 'connected' || (c.wa.totalMessages ?? 0) > 0) && (
+              <div className="gmail-scan-summary">
+                <span>
+                  Captured: {(c.wa.totalMessages ?? 0).toLocaleString()} messages
+                  {typeof c.wa.chats === 'number' ? ` · ${c.wa.chats} chats` : ''}
+                </span>
+                <span>Vectorized: {(c.wa.processedMessages ?? 0).toLocaleString()} messages</span>
               </div>
             )}
 
@@ -1232,6 +1461,7 @@ function AppShell() {
 
   const [connectors, setConnectors] = useState<Connector[]>(INITIAL_CONNECTORS)
   const [gmailNotice, setGmailNotice] = useState<string | null>(null)
+  const [waModalOpen, setWaModalOpen] = useState(false)
   const [entities, setEntities] = useState<Entity[]>(INITIAL_ENTITIES)
   const [entwinName, setEntwinName] = useState('')
 
@@ -1312,6 +1542,38 @@ function AppShell() {
       },
     [],
   )
+
+  // Pull live WhatsApp status and fold it into the WhatsApp connector card.
+  const refreshWhatsAppStatus = useMemo(
+    () => async () => {
+      try {
+        const res = await fetch('/api/whatsapp/status')
+        if (!res.ok) return
+        const st = (await res.json()) as WaStatus
+        setConnectors((prev) =>
+          prev.map((c) =>
+            c.service === 'whatsapp'
+              ? { ...c, wa: st, connected: st.state === 'connected' }
+              : c,
+          ),
+        )
+      } catch {
+        /* ignore */
+      }
+    },
+    [],
+  )
+
+  // Poll WhatsApp status while linked (or pairing) so captured/vectorized
+  // counts stay fresh on the card. Cheap GET; backs off when disconnected.
+  useEffect(() => {
+    refreshWhatsAppStatus()
+    const wa = connectors.find((c) => c.service === 'whatsapp')?.wa
+    const active = wa?.state === 'connected' || wa?.state === 'pairing'
+    const interval = setInterval(refreshWhatsAppStatus, active ? 15000 : 60000)
+    return () => clearInterval(interval)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshWhatsAppStatus, connectors.find((c) => c.service === 'whatsapp')?.wa?.state])
 
   // On return from Google consent (?gmail=connected&card=...), open the
   // Connectors view and start the scan for that card.
@@ -1432,7 +1694,7 @@ function AppShell() {
         {/* CONNECTORS */}
         <div className={`view${view === 'connectors' ? ' active' : ''}`} id="view-connectors">
           <div className="view-header">Connectors<div className="sub">Sources feeding the vault</div></div>
-          <ConnectorsView connectors={connectors} setConnectors={setConnectors} runGmailScan={runGmailScan} notice={gmailNotice} clearNotice={() => setGmailNotice(null)} />
+          <ConnectorsView connectors={connectors} setConnectors={setConnectors} runGmailScan={runGmailScan} openWhatsApp={() => setWaModalOpen(true)} notice={gmailNotice} clearNotice={() => setGmailNotice(null)} />
         </div>
 
         {/* DASHBOARD */}
@@ -1454,6 +1716,13 @@ function AppShell() {
           <SettingsView entwinName={entwinName} setEntwinName={setEntwinName} />
         </div>
       </div>
+
+      {waModalOpen && (
+        <WhatsAppModal
+          onClose={() => setWaModalOpen(false)}
+          onLinked={refreshWhatsAppStatus}
+        />
+      )}
     </div>
   )
 }

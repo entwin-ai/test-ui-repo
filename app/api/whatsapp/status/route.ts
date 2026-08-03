@@ -7,5 +7,5 @@ export const dynamic = "force-dynamic"
 export async function GET() {
   const auth = await requireUser()
   if ("error" in auth) return auth.error
-  return NextResponse.json(status(auth.email))
+  return NextResponse.json(await status(auth.email))
 }

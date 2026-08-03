@@ -1229,3 +1229,168 @@
   padding: 0 4px;
 }
 .gmail-notice-close:hover { opacity: 0.7; }
+
+/* ============ WHATSAPP CONNECT MODAL ============ */
+.wa-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(33, 29, 30, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  padding: 20px;
+}
+.wa-window {
+  width: 420px;
+  max-width: 96vw;
+  background: var(--bg-main);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(33, 29, 30, 0.28);
+  overflow: hidden;
+  animation: wa-pop 0.16s ease-out;
+}
+@keyframes wa-pop {
+  from { transform: translateY(6px) scale(0.98); opacity: 0; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
+}
+.wa-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.wa-badge {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: #25d366;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.wa-head-title { font-size: 14.5px; font-weight: 600; flex: 1; }
+.wa-close {
+  background: none;
+  border: none;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 4px;
+}
+.wa-close:hover { color: var(--text-primary); }
+.wa-body { padding: 18px 16px 16px; }
+.wa-lead { font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin: 0 0 14px; }
+.wa-label { display: block; font-size: 11.5px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
+.wa-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  font-size: 15px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  outline: none;
+}
+.wa-input:focus { border-color: var(--accent); background: var(--bg-main); }
+.wa-error {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #b23b3b;
+  background: rgba(178, 59, 59, 0.08);
+  border: 1px solid rgba(178, 59, 59, 0.2);
+  border-radius: 8px;
+  padding: 8px 10px;
+  line-height: 1.4;
+}
+.wa-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.wa-btn {
+  padding: 9px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 9px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+}
+.wa-btn:disabled { opacity: 0.55; cursor: default; }
+.wa-btn.ghost { background: var(--bg-main); color: var(--text-secondary); }
+.wa-btn.ghost:hover:not(:disabled) { background: var(--bg-hover); }
+.wa-btn.primary { background: var(--text-primary); color: #fff; border-color: var(--text-primary); }
+.wa-btn.primary:hover:not(:disabled) { opacity: 0.9; }
+.wa-code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: 4px;
+  text-align: center;
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 18px 10px;
+  margin: 4px 0 14px;
+}
+.wa-waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.wa-spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: wa-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes wa-spin { to { transform: rotate(360deg); } }
+.wa-fineprint { font-size: 11.5px; color: var(--text-muted); line-height: 1.5; margin: 14px 0 0; }
+.wa-success { text-align: center; }
+.wa-check {
+  width: 46px;
+  height: 46px;
+  margin: 4px auto 12px;
+  border-radius: 50%;
+  background: #25d366;
+  color: #fff;
+  font-size: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.wa-success-title { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+
+/* WhatsApp modal — batch-model additions */
+.wa-cmd {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 4px 0 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.wa-link {
+  display: inline-block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent);
+  text-decoration: none;
+  margin: 2px 0 8px;
+}
+.wa-link:hover { text-decoration: underline; }

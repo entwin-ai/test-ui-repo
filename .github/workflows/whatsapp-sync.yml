@@ -1,0 +1,64 @@
+name: whatsapp-sync
+
+# Hourly BATCH ingestion for every linked WhatsApp account. Each run is a fully
+# bounded job (no socket held between runs): for each account it opens a
+# short-lived Baileys socket using credentials saved in Redis, drains WhatsApp's
+# offline backlog into the whatsapp_message ledger, then vectorizes the new rows
+# into memory notes + entities + embeddings — the same pipeline Gmail uses.
+#
+# This is why WhatsApp works on GitHub Actions: capture is a per-run drain, not
+# a persistent connection. Pairing is done once, out of band, via whatsapp-pair.
+#
+# CAVEAT: GitHub cron is best-effort (runs can be delayed 15-45 min) and
+# auto-disables after 60 days of repo inactivity. For guaranteed hourly timing,
+# drive `workflow_dispatch` from Upstash QStash or Supabase pg_cron instead; the
+# job body is unchanged.
+on:
+  schedule:
+    - cron: '0 * * * *'   # top of every hour
+  workflow_dispatch:
+    inputs:
+      user_email:
+        description: 'Scope to one user email (blank = all linked)'
+        required: false
+        default: ''
+
+concurrency:
+  # Never let two sync runs overlap for the same scope — a second socket for the
+  # same device while the first is draining causes WhatsApp to close both.
+  group: wa-sync-${{ github.event.inputs.user_email || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  whatsapp-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ingestion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install
+        working-directory: worker
+        run: npm install --omit=dev
+      - name: Run WhatsApp sync (capture + vectorize)
+        working-directory: worker
+        env:
+          MODE: whatsapp-sync
+          ONLY_USER: ${{ github.event.inputs.user_email }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # WhatsApp auth creds + per-user LLM keys both live in this Redis.
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          ENTWIN_KEY_SECRET: ${{ secrets.ENTWIN_KEY_SECRET }}
+          CLAUDE_EMBED_MODEL: ${{ secrets.CLAUDE_EMBED_MODEL }}
+          OPENAI_EMBED_MODEL: ${{ secrets.OPENAI_EMBED_MODEL }}
+          GEMINI_EMBED_MODEL: ${{ secrets.GEMINI_EMBED_MODEL }}
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          INGEST_CONCURRENCY: ${{ vars.INGEST_CONCURRENCY }}
+          # Optional tuning of the per-run drain window (see whatsapp-capture.js).
+          WA_DRAIN_MS: ${{ vars.WA_DRAIN_MS }}
+          WA_QUIET_MS: ${{ vars.WA_QUIET_MS }}
+        run: npm start
