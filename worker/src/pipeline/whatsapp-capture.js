@@ -111,27 +111,17 @@ export async function captureWhatsapp(acct) {
     acct.wa_backfill_after || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
   const { state, saveCreds, flush } = await useRedisAuthState(userEmail);
-  const { version } = await fetchLatestBaileysVersion();
 
   const buffer = [];
   let captured = 0;
-
-  const sock = makeWASocket({
-    version,
-    auth: state,
-    logger,
-    printQRInTerminal: false,
-    markOnlineOnConnect: false, // stay passive; don't change the user's presence
-    // Full history only matters on a first connect after pairing. On subsequent
-    // hourly runs WhatsApp just replays what we missed (the offline sync).
-    syncFullHistory: !acct.backfill_done,
-    browser: Browsers.macOS('Desktop'),
-  });
 
   return await new Promise((resolve) => {
     let done = false;
     let quietTimer = null;
     let hardTimer = null;
+    let reconnects = 0;
+    const MAX_RECONNECTS = 5;
+    let sock = null;
 
     const collect = (msgs) => {
       for (const m of msgs) {
@@ -159,48 +149,88 @@ export async function captureWhatsapp(acct) {
         console.error(`[${userEmail}/wa] cred flush failed:`, e.message);
       }
       try {
-        sock.end(undefined); // close socket; do NOT logout (keeps the link)
+        sock?.end(undefined); // close socket; do NOT logout (keeps the link)
       } catch {}
       console.log(`[${userEmail}/wa] capture done (${reason}) — ${captured} rows`);
       resolve({ captured });
     };
 
+    // One overall ceiling across the whole run, including reconnects.
     hardTimer = setTimeout(() => finish('ceiling'), MAX_DRAIN_MS);
 
-    sock.ev.on('creds.update', saveCreds);
+    async function connect() {
+      const { version } = await fetchLatestBaileysVersion();
 
-    sock.ev.on('messaging-history.set', ({ messages }) => collect(messages || []));
-    sock.ev.on('messages.upsert', ({ messages }) => collect(messages || []));
+      sock = makeWASocket({
+        version,
+        auth: state,
+        logger,
+        printQRInTerminal: false,
+        markOnlineOnConnect: false, // stay passive; don't change presence
+        // Full history only matters on a first connect after pairing. On
+        // subsequent hourly runs WhatsApp just replays what we missed.
+        syncFullHistory: !acct.backfill_done,
+        browser: Browsers.ubuntu('Chrome'),
+      });
 
-    sock.ev.on('connection.update', (u) => {
-      const { connection, lastDisconnect } = u;
-      if (connection === 'open') {
-        // Connected. Start the quiet clock; offline sync events will keep
-        // pushing it out until the backlog is drained.
-        if (quietTimer) clearTimeout(quietTimer);
-        quietTimer = setTimeout(() => finish('quiet'), QUIET_MS);
-      } else if (connection === 'close') {
-        const code = (lastDisconnect?.error instanceof Boom
-          ? lastDisconnect.error.output?.statusCode
-          : undefined);
-        if (code === DisconnectReason.loggedOut) {
-          // The user unlinked the device from their phone. Purge creds so we
-          // don't retry forever, and mark the account for re-pair.
-          clearAuthState(userEmail).catch(() => {});
-          admin
-            .from('sync_state')
-            .update({ backfill_done: false, updated_at: new Date().toISOString() })
-            .eq('id', acct.id)
-            .then(() => {}, () => {});
-          finish('logged-out');
-        } else {
-          // Transient close (incl. the restart WhatsApp requests right after a
-          // fresh pairing). For a bounded run we don't reconnect — persist what
-          // we have and let the next hourly run pick up the rest from the
-          // offline buffer.
+      sock.ev.on('creds.update', saveCreds);
+      sock.ev.on('messaging-history.set', ({ messages }) => collect(messages || []));
+      sock.ev.on('messages.upsert', ({ messages }) => collect(messages || []));
+
+      sock.ev.on('connection.update', (u) => {
+        if (done) return;
+        const { connection, lastDisconnect } = u;
+
+        if (connection === 'open') {
+          // Connected. Start the quiet clock; offline-sync events will keep
+          // pushing it out until the backlog is drained.
+          if (quietTimer) clearTimeout(quietTimer);
+          quietTimer = setTimeout(() => finish('quiet'), QUIET_MS);
+          return;
+        }
+
+        if (connection === 'close') {
+          const code = (lastDisconnect?.error instanceof Boom
+            ? lastDisconnect.error.output?.statusCode
+            : undefined);
+
+          if (code === DisconnectReason.loggedOut) {
+            // The user unlinked the device from their phone. Purge creds so we
+            // don't retry forever, and mark the account for re-pair.
+            clearAuthState(userEmail).catch(() => {});
+            admin
+              .from('sync_state')
+              .update({ backfill_done: false, updated_at: new Date().toISOString() })
+              .eq('id', acct.id)
+              .then(() => {}, () => {});
+            finish('logged-out');
+            return;
+          }
+
+          // WhatsApp requests a stream RESTART (515) right after a fresh pairing
+          // and occasionally drops (428) before the session opens. On a bounded
+          // run we MUST reconnect through these — otherwise the very first
+          // capture never reaches `open`, never receives the offline-sync
+          // history, and drains nothing (green job, zero rows). Reuse the shared
+          // (now-registered) auth state; it carries the session to `open`.
+          if (code === DisconnectReason.restartRequired || code === 515 || code === 428) {
+            try { sock?.end(undefined); } catch {}
+            if (reconnects >= MAX_RECONNECTS) {
+              finish(`too-many-reconnects-${code}`);
+              return;
+            }
+            reconnects += 1;
+            setTimeout(() => { connect().catch(() => finish('reconnect-error')); }, 1500);
+            return;
+          }
+
+          // Any other close: persist what we have and let the next hourly run
+          // pick up the rest from the offline buffer.
           finish(`closed-${code ?? 'unknown'}`);
         }
-      }
-    });
+      });
+    }
+
+    connect().catch(() => finish('connect-error'));
   });
 }

@@ -64,114 +64,61 @@ async function main() {
   await ensureSyncStateRow();
 
   const { state, saveCreds, flush } = await useRedisAuthState(USER_EMAIL);
+  const { version } = await fetchLatestBaileysVersion();
 
-  // A single hard timeout spans the whole pairing attempt, including any
-  // reconnects during the post-code handshake.
-  let done = false;
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    logger,
+    printQRInTerminal: false,
+    markOnlineOnConnect: false,
+    syncFullHistory: true,
+    browser: Browsers.macOS('Desktop'),
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+
   let codeRequested = false;
   const hardTimer = setTimeout(async () => {
-    if (done) return;
-    done = true;
     await flush().catch(() => {});
-    fail('timed out waiting for the device link to complete');
+    fail('timed out waiting for you to enter the pairing code on your phone');
   }, PAIR_TIMEOUT_MS);
 
-  // After you enter the code, WhatsApp restarts the stream (status 515) and
-  // sometimes drops it once or twice (428) before the session goes `open`.
-  // Each of those is a *reconnect*, not a failure — so we (re)build the socket
-  // on close and only give up once we've exhausted our reconnect budget or the
-  // hard timeout fires.
-  const MAX_RECONNECTS = 5;
-  let reconnects = 0;
-
-  async function connect() {
-    const { version } = await fetchLatestBaileysVersion();
-
-    const sock = makeWASocket({
-      version,
-      auth: state,
-      logger,
-      printQRInTerminal: false,
-      markOnlineOnConnect: false,
-      syncFullHistory: true,
-      browser: Browsers.ubuntu('Chrome'),
-    });
-
-    sock.ev.on('creds.update', saveCreds);
-
-    // Request the pairing code up front (once), not on a `qr` event. For
-    // phone-number pairing there is no QR, and waiting for one lets the server
-    // close the socket (428) before we ever ask. Only do this on the first
-    // connect, before the device is registered.
-    if (!codeRequested && !sock.authState.creds.registered) {
-      setTimeout(async () => {
-        if (codeRequested || sock.authState.creds.registered) return;
-        codeRequested = true;
-        try {
-          const code = await sock.requestPairingCode(WA_PHONE);
-          const pretty = code.match(/.{1,4}/g)?.join('-') ?? code;
-          console.log('\n==================================================');
-          console.log(`  WhatsApp pairing code for ${USER_EMAIL}: ${pretty}`);
-          console.log('  On your phone: WhatsApp → Settings → Linked devices');
-          console.log('  → Link a device → Link with phone number → enter the code');
-          console.log('==================================================\n');
-        } catch (e) {
-          if (done) return;
-          done = true;
-          clearTimeout(hardTimer);
-          fail(`WhatsApp rejected the pairing request: ${e.message}`);
-        }
-      }, 3000);
-    }
-
-    sock.ev.on('connection.update', async (u) => {
-      if (done) return;
-
-      if (u.connection === 'open') {
-        done = true;
+  sock.ev.on('connection.update', async (u) => {
+    if (u.qr && !codeRequested) {
+      // Handshake done — safe to request a pairing code now.
+      codeRequested = true;
+      try {
+        const code = await sock.requestPairingCode(WA_PHONE);
+        const pretty = code.match(/.{1,4}/g)?.join('-') ?? code;
+        console.log('\n==================================================');
+        console.log(`  WhatsApp pairing code for ${USER_EMAIL}: ${pretty}`);
+        console.log('  On your phone: WhatsApp → Settings → Linked devices');
+        console.log('  → Link a device → Link with phone number → enter the code');
+        console.log('==================================================\n');
+      } catch (e) {
         clearTimeout(hardTimer);
-        await flush().catch(() => {});
-        console.log(`pair: ${USER_EMAIL} linked successfully. Credentials saved to Redis.`);
-        console.log('pair: the hourly whatsapp-sync job will now ingest messages.');
-        try { sock.end(undefined); } catch {}
-        process.exit(0);
+        fail(`WhatsApp rejected the pairing request: ${e.message}`);
       }
-
-      if (u.connection === 'close') {
-        const status = u.lastDisconnect?.error?.output?.statusCode;
-
-        // If we never got as far as requesting a code, the handshake failed
-        // outright — no point reconnecting.
-        if (!codeRequested) {
-          done = true;
-          clearTimeout(hardTimer);
-          fail(`connection closed before pairing (status ${status ?? 'unknown'}) — try again`);
-        }
-
-        // 401 = logged out / credentials rejected: reconnecting won't help.
-        if (status === 401) {
-          done = true;
-          clearTimeout(hardTimer);
-          fail('device link was rejected (status 401) — start a fresh pairing');
-        }
-
-        // Otherwise this is a normal restart in the pairing handshake
-        // (515 stream-restart, 428 transient close). Reconnect and let the
-        // registered creds carry the session to `open`.
-        try { sock.end(undefined); } catch {}
-        if (reconnects >= MAX_RECONNECTS) {
-          done = true;
-          clearTimeout(hardTimer);
-          fail(`too many reconnects during pairing (last status ${status ?? 'unknown'}) — try again`);
-        }
-        reconnects += 1;
-        await flush().catch(() => {});
-        setTimeout(() => { connect().catch((e) => fail(e.message)); }, 1500);
+    }
+    if (u.connection === 'open') {
+      clearTimeout(hardTimer);
+      await flush().catch(() => {});
+      console.log(`pair: ${USER_EMAIL} linked successfully. Credentials saved to Redis.`);
+      console.log('pair: the hourly whatsapp-sync job will now ingest messages.');
+      try { sock.end(undefined); } catch {}
+      process.exit(0);
+    }
+    if (u.connection === 'close') {
+      const code = u.lastDisconnect?.error?.output?.statusCode;
+      // A close right after the handshake is normal before the code is entered;
+      // only treat it as fatal if we never got to request a code.
+      if (!codeRequested) {
+        clearTimeout(hardTimer);
+        fail(`connection closed before pairing (status ${code ?? 'unknown'}) — try again`);
       }
-    });
-  }
-
-  await connect();
+    }
+  });
 }
 
 main().catch((e) => fail(e.message));
