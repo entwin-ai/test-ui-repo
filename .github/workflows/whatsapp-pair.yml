@@ -17,6 +17,11 @@ on:
       phone:
         description: 'WhatsApp number, digits incl. ISD code (e.g. 13125551234)'
         required: true
+      force_repair:
+        description: 'Wipe any existing link first (use if re-pairing a device that shows Linked but fails)'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: wa-pair-${{ github.event.inputs.user_email }}
@@ -40,6 +45,7 @@ jobs:
         env:
           USER_EMAIL: ${{ github.event.inputs.user_email }}
           WA_PHONE: ${{ github.event.inputs.phone }}
+          FORCE_REPAIR: ${{ github.event.inputs.force_repair }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}

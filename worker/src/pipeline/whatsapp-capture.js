@@ -209,10 +209,10 @@ export async function captureWhatsapp(acct) {
 
           // WhatsApp requests a stream RESTART (515) right after a fresh pairing
           // and occasionally drops (428) before the session opens. On a bounded
-          // run we MUST reconnect through these — otherwise the very first
-          // capture never reaches `open`, never receives the offline-sync
-          // history, and drains nothing (green job, zero rows). Reuse the shared
-          // (now-registered) auth state; it carries the session to `open`.
+          // run we MUST reconnect through these — otherwise the first capture
+          // never reaches `open`, never receives the offline-sync history, and
+          // drains nothing (green job, zero rows). Reuse the shared registered
+          // auth state; it carries the session to `open`.
           if (code === DisconnectReason.restartRequired || code === 515 || code === 428) {
             try { sock?.end(undefined); } catch {}
             if (reconnects >= MAX_RECONNECTS) {
