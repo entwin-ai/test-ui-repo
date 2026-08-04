@@ -89,8 +89,8 @@ async function isLinked(email: string): Promise<boolean> {
 
 /**
  * The pairing code published by the whatsapp-pair job, if one is currently live
- * (the key has a short TTL and is deleted on successful link). Returned to the
- * UI so the connectors tab can display the code directly.
+ * (short TTL, deleted on successful link). Returned to the UI so the connectors
+ * tab can display the code directly.
  */
 async function getPairCode(
   email: string,

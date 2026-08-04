@@ -16,19 +16,16 @@ import { publishPairCode, clearPairCode } from './lib/wa-paircode.js';
 //
 // Run it either:
 //   * locally:   USER_EMAIL=you@x.com WA_PHONE=13125551234 npm run pair
-//   * or via the manually-dispatched `whatsapp-pair` GitHub Actions workflow,
-//     reading the printed pairing code from the job logs.
+//   * or via the manually-dispatched `whatsapp-pair` GitHub Actions workflow.
 //
-// It keeps the socket open only long enough for you to type the code on your
-// phone (WhatsApp → Settings → Linked devices → Link with phone number), then
-// saves creds and exits. This is the only step that needs a live socket, and
-// it's a one-minute, one-time operation — not ongoing hosting.
+// The pairing code is printed to the log AND published to Redis so the app's
+// connectors tab can display it (see wa-paircode.js).
 
 const logger = pino({ level: process.env.WA_LOG_LEVEL || 'silent' });
 
 const USER_EMAIL = process.env.USER_EMAIL;
 const WA_PHONE = (process.env.WA_PHONE || '').replace(/\D/g, '');
-const PAIR_TIMEOUT_MS = Number(process.env.WA_PAIR_TIMEOUT_MS || 180_000); // 3 min to enter the code
+const PAIR_TIMEOUT_MS = Number(process.env.WA_PAIR_TIMEOUT_MS || 300_000); // 5 min
 const INITIAL_WINDOW_DAYS = 30;
 
 function fail(msg) {
@@ -58,18 +55,18 @@ async function main() {
   // FORCE_REPAIR=1 wipes any existing device link first. Use this when a prior
   // link is half-broken — e.g. the device shows Linked but sync closes with 428,
   // or you unlinked from the phone and need a clean re-pair. WhatsApp refuses to
-  // re-pair a number it still considers linked, so clearing the stale creds is
-  // what breaks the 428 loop.
+  // re-pair a number it still considers linked, so clearing stale creds is what
+  // breaks the 428 loop.
   const FORCE_REPAIR = /^(1|true|yes)$/i.test(process.env.FORCE_REPAIR || '');
   if (FORCE_REPAIR) {
     console.log(`pair: FORCE_REPAIR set — clearing existing credentials for ${USER_EMAIL}.`);
     await clearAuthState(USER_EMAIL).catch((e) => console.error(`pair: clear failed: ${e.message}`));
+    await clearPairCode(USER_EMAIL).catch(() => {});
   }
 
   if (!FORCE_REPAIR && (await hasCreds(USER_EMAIL))) {
     console.log(`pair: ${USER_EMAIL} already has registered credentials — nothing to do.`);
     console.log('pair: to force a clean re-link, re-run this workflow with FORCE_REPAIR=1.');
-    // Still make sure the sync_state row exists so the hourly job enumerates it.
     await ensureSyncStateRow();
     process.exit(0);
   }
@@ -112,7 +109,7 @@ async function main() {
 
     // Request the code up front (once), NOT on a `qr` event. Phone-number
     // pairing has no QR; waiting for one lets the server close the socket (428)
-    // before we ever ask — which is exactly the 2-second failure you saw.
+    // before we ever ask.
     if (!codeRequested && !sock.authState.creds.registered) {
       setTimeout(async () => {
         if (done || codeRequested || sock.authState.creds.registered) return;
@@ -120,9 +117,8 @@ async function main() {
         try {
           const code = await sock.requestPairingCode(WA_PHONE);
           const pretty = code.match(/.{1,4}/g)?.join('-') ?? code;
-          // Publish to Redis so the app's connectors tab can show the code
-          // directly, instead of the user opening the Actions log. Best-effort:
-          // never let a Redis hiccup break pairing.
+          // Publish to Redis so the app's connectors tab shows the code directly.
+          // Best-effort: never let a Redis hiccup break pairing.
           publishPairCode(USER_EMAIL, code, WA_PHONE).catch((e) =>
             console.error(`pair: could not publish code to Redis: ${e.message}`)
           );
@@ -148,7 +144,6 @@ async function main() {
         done = true;
         clearTimeout(hardTimer);
         await flush().catch(() => {});
-        // Device linked — remove the published code so the UI stops showing it.
         await clearPairCode(USER_EMAIL).catch(() => {});
         console.log(`pair: ${USER_EMAIL} linked successfully. Credentials saved to Redis.`);
         console.log('pair: the hourly whatsapp-sync job will now ingest messages.');
