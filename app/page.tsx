@@ -51,6 +51,18 @@ const BRAND_ICONS: Record<string, JSX.Element> = {
       <text x="12" y="17.5" fontSize="9.5" fontWeight="700" fill="#1a73e8" textAnchor="middle" fontFamily="Arial, sans-serif">31</text>
     </svg>
   ),
+  slack: (
+    <svg viewBox="0 0 24 24">
+      <path fill="#36c5f0" d="M9 3.5A1.75 1.75 0 1 0 7.25 5.25H9V3.5z" transform="translate(0 0)" />
+      <path fill="#36c5f0" d="M5.25 8.75A1.75 1.75 0 0 1 3.5 7 1.75 1.75 0 0 1 5.25 5.25h4.5A1.75 1.75 0 0 1 11.5 7v1.75H5.25z" />
+      <path fill="#2eb67d" d="M20.5 9a1.75 1.75 0 1 0-1.75 1.75H20.5V9z" />
+      <path fill="#2eb67d" d="M15.25 5.25A1.75 1.75 0 0 1 17 3.5a1.75 1.75 0 0 1 1.75 1.75v4.5A1.75 1.75 0 0 1 17 11.5h-1.75v-6.25z" />
+      <path fill="#ecb22e" d="M15 20.5a1.75 1.75 0 1 0 1.75-1.75H15V20.5z" />
+      <path fill="#ecb22e" d="M18.75 15.25A1.75 1.75 0 0 1 20.5 17a1.75 1.75 0 0 1-1.75 1.75h-4.5A1.75 1.75 0 0 1 12.5 17v-1.75h6.25z" />
+      <path fill="#e01e5a" d="M3.5 15a1.75 1.75 0 1 0 1.75 1.75V15H3.5z" />
+      <path fill="#e01e5a" d="M8.75 18.75A1.75 1.75 0 0 1 7 20.5a1.75 1.75 0 0 1-1.75-1.75v-4.5A1.75 1.75 0 0 1 7 12.5h1.75v6.25z" />
+    </svg>
+  ),
 }
 
 interface GmailScan {
@@ -68,6 +80,21 @@ interface WaStatus {
   latest?: string | null
 }
 
+interface SlackChannelCount {
+  id: string
+  name: string
+  type: 'public' | 'private' | 'im' | 'mpim'
+  messageCount: number
+}
+
+interface SlackScan {
+  totalMessages: number
+  activeChannels: number
+  scannedChannels: number
+  channels: SlackChannelCount[]
+  windowDays: number
+}
+
 interface Connector {
   name: string
   service: string | null
@@ -78,9 +105,14 @@ interface Connector {
   connectedEmail: string | null
   // Gmail cards get a stable id used by the real OAuth + scan backend.
   cardId?: 'gmail-personal' | 'gmail-professional'
+  // Slack card gets its own stable id used by the real Slack OAuth + scan backend.
+  slackCardId?: 'slack-workspace'
   // Local UI state for the Gmail read/parse flow.
   scanning?: boolean
   scan?: GmailScan | null
+  // Local UI state for the Slack 1-month read flow.
+  slackScan?: SlackScan | null
+  slackTeam?: string | null
   // WhatsApp live state (real Baileys backend).
   wa?: WaStatus | null
 }
@@ -93,7 +125,7 @@ const INITIAL_CONNECTORS: Connector[] = [
   { name: 'Google Calendar', service: null, icon: 'calendar', desc: 'Meeting and scheduling context.', connected: false, connectedEmail: null },
   { name: 'WhatsApp', service: 'whatsapp', code: 'WA', desc: 'Personal messages, vectorized into cross-channel memory.', connected: false, connectedEmail: null, wa: null },
   { name: 'Telegram', service: null, code: 'TG', desc: 'Personal messages, facet-decomposed.', connected: false, connectedEmail: null },
-  { name: 'Slack', service: null, code: 'SL', desc: 'Work channel ingestion.', connected: false, connectedEmail: null },
+  { name: 'Slack', service: 'slack', icon: 'slack', slackCardId: 'slack-workspace', desc: 'Work channel ingestion — pulls the last 1 month of Slack chats.', connected: false, connectedEmail: null, slackScan: null },
   { name: 'Browser history', service: null, code: 'BH', desc: 'Search activity as raw source.', connected: false, connectedEmail: null },
 ]
 
@@ -533,6 +565,7 @@ function ConnectorsView({
 }) {
   const isGmail = (c: Connector) => c.service === 'gmail' && !!c.cardId
   const isWhatsApp = (c: Connector) => c.service === 'whatsapp'
+  const isSlack = (c: Connector) => c.service === 'slack' && !!c.slackCardId
 
   const toggle = (idx: number) => {
     const c = connectors[idx]
@@ -572,6 +605,29 @@ function ConnectorsView({
       return
     }
 
+    // Slack card uses the real Slack OAuth + 1-month read backend.
+    if (isSlack(c)) {
+      if (c.connected) {
+        // Disconnect: clear the server-side token, then reset the card.
+        fetch('/api/slack/disconnect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ card: c.slackCardId }),
+        }).catch(() => {})
+        setConnectors((prev) =>
+          prev.map((x, i) =>
+            i === idx
+              ? { ...x, connected: false, connectedEmail: null, slackScan: null, slackTeam: null, scanning: false }
+              : x,
+          ),
+        )
+        return
+      }
+      // Connect: hand off to Slack. On return the app auto-pulls the last month.
+      window.location.href = `/api/slack/authorize?card=${c.slackCardId}`
+      return
+    }
+
     // Everything else stays a local, static toggle (prototype behaviour).
     setConnectors((prev) =>
       prev.map((x, i) => {
@@ -594,11 +650,14 @@ function ConnectorsView({
       {connectors.map((c, idx) => {
         const gmail = isGmail(c)
         const whatsapp = isWhatsApp(c)
+        const slack = isSlack(c)
         let statusText: string
         if (whatsapp && c.wa) {
           if (c.wa.state === 'pairing') statusText = 'Pairing — enter code on phone'
           else if (c.wa.state === 'connected') statusText = 'Linked · syncs hourly'
           else statusText = 'Not connected'
+        } else if (slack && c.connected) {
+          statusText = c.slackTeam ? `Connected · ${c.slackTeam}` : 'Connected'
         } else if (c.connected) {
           statusText = c.connectedEmail ? `Connected as ${c.connectedEmail}` : 'Connected'
         } else {
@@ -648,6 +707,32 @@ function ConnectorsView({
                   {typeof c.wa.chats === 'number' ? ` · ${c.wa.chats} chats` : ''}
                 </span>
                 <span>Vectorized: {(c.wa.processedMessages ?? 0).toLocaleString()} messages</span>
+              </div>
+            )}
+
+            {/* Slack read summary — last-month message + channel counts. */}
+            {slack && c.connected && (c.scanning || c.slackScan) && (
+              <div className="gmail-scan-summary">
+                {c.scanning ? (
+                  <span className="gmail-scan-loading">Pulling your last 1 month of Slack chats…</span>
+                ) : c.slackScan ? (
+                  <>
+                    <span>
+                      Last 30 days: {c.slackScan.totalMessages.toLocaleString()} messages
+                      {` · ${c.slackScan.activeChannels} active channel${c.slackScan.activeChannels === 1 ? '' : 's'}`}
+                    </span>
+                    {c.slackScan.channels.length > 0 && (
+                      <span>
+                        Busiest: {c.slackScan.channels
+                          .slice(0, 3)
+                          .map((ch) =>
+                            `${ch.type === 'im' ? 'DM' : ch.type === 'mpim' ? 'Group DM' : '#' + ch.name} (${ch.messageCount})`,
+                          )
+                          .join(', ')}
+                      </span>
+                    )}
+                  </>
+                ) : null}
               </div>
             )}
 
@@ -1569,6 +1654,93 @@ function AppShell() {
     [],
   )
 
+  // Kicks off a real Slack read: mark the card connected + scanning, pull the
+  // last 1 month of chats across all conversations, then show the counts.
+  const runSlackScan = useMemo(
+    () =>
+      async (cardId: NonNullable<Connector['slackCardId']>) => {
+        // Pull the connected workspace name so the card can label itself.
+        let slackTeam: string | null = null
+        try {
+          const st = await fetch(`/api/slack/status?card=${cardId}`)
+          if (st.ok) slackTeam = (await st.json()).teamName ?? null
+        } catch {
+          /* ignore */
+        }
+
+        setConnectors((prev) =>
+          prev.map((c) =>
+            c.slackCardId === cardId
+              ? { ...c, connected: true, slackTeam, scanning: true, slackScan: null }
+              : c,
+          ),
+        )
+
+        try {
+          const res = await fetch('/api/slack/scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ card: cardId }),
+          })
+          const raw = await res.text()
+          let payload: {
+            totalMessages?: number
+            activeChannels?: number
+            scannedChannels?: number
+            channels?: SlackChannelCount[]
+            windowDays?: number
+            error?: string
+          } = {}
+          if (raw) {
+            try {
+              payload = JSON.parse(raw)
+            } catch {
+              throw new Error(
+                res.ok
+                  ? 'The read was cut off before it finished (likely a timeout on a large workspace). Try again.'
+                  : `scan failed (${res.status})`,
+              )
+            }
+          }
+          if (!res.ok) throw new Error(payload.error || `scan failed (${res.status})`)
+          setConnectors((prev) =>
+            prev.map((c) =>
+              c.slackCardId === cardId
+                ? {
+                    ...c,
+                    scanning: false,
+                    slackScan: {
+                      totalMessages: payload.totalMessages ?? 0,
+                      activeChannels: payload.activeChannels ?? 0,
+                      scannedChannels: payload.scannedChannels ?? 0,
+                      channels: payload.channels ?? [],
+                      windowDays: payload.windowDays ?? 30,
+                    },
+                  }
+                : c,
+            ),
+          )
+          // Kick off the async 1-month backfill (GitHub Actions worker). This is
+          // fire-and-forget: it registers the account for syncing and queues the
+          // capture + vectorize job. Failure here doesn't affect the scan
+          // result already shown to the user.
+          fetch('/api/slack/ingest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ card: cardId }),
+          }).catch(() => {
+            /* non-fatal: backfill can be retried from the dashboard */
+          })
+        } catch (e) {
+          setGmailNotice(`Slack read failed: ${(e as Error).message}`)
+          setConnectors((prev) =>
+            prev.map((c) => (c.slackCardId === cardId ? { ...c, scanning: false } : c)),
+          )
+        }
+      },
+    [],
+  )
+
   // Pull live WhatsApp status and fold it into the WhatsApp connector card.
   const refreshWhatsAppStatus = useMemo(
     () => async () => {
@@ -1626,6 +1798,60 @@ function AppShell() {
       window.history.replaceState({}, '', window.location.pathname)
     }
   }, [runGmailScan])
+
+  // On mount, hydrate the Slack card from server state so a connected
+  // workspace (and its last read) survives a page refresh.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch('/api/slack/status?card=slack-workspace')
+        if (!res.ok) return
+        const st = (await res.json()) as {
+          state: string
+          teamName: string | null
+          scan: SlackScan | null
+        }
+        if (cancelled || st.state !== 'connected') return
+        setConnectors((prev) =>
+          prev.map((c) =>
+            c.slackCardId === 'slack-workspace'
+              ? { ...c, connected: true, slackTeam: st.teamName, slackScan: st.scan }
+              : c,
+          ),
+        )
+      } catch {
+        /* ignore */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // On return from Slack consent (?slack=connected&card=...), open the
+  // Connectors view and pull the last 1 month of chats for that card.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const slack = params.get('slack')
+    const card = params.get('card')
+    if (slack === 'connected' && card === 'slack-workspace') {
+      setView('connectors')
+      runSlackScan(card)
+    } else if (slack === 'denied') {
+      setView('connectors')
+      setGmailNotice('Slack connection was cancelled — you did not grant access.')
+    } else if (slack === 'error') {
+      const reason = params.get('reason')
+      setView('connectors')
+      setGmailNotice(
+        `Slack connection failed${reason ? `: ${decodeURIComponent(reason)}` : ''}. Please try again.`,
+      )
+    }
+    if (slack) {
+      window.history.replaceState({}, '', window.location.pathname)
+    }
+  }, [runSlackScan])
 
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {

@@ -1,0 +1,55 @@
+name: slack-sync
+
+# Hourly delta ingestion for every connected Slack account. Same bounded job as
+# the backfill: for each account it re-captures anything new in the last month
+# (idempotent upsert) and vectorizes the unprocessed rows. Because the vectorize
+# step only touches processed_at IS NULL rows, running this every hour is safe
+# regardless of how much capture produced.
+#
+# CAVEAT: GitHub cron is best-effort (runs can be delayed 15-45 min) and
+# auto-disables after 60 days of repo inactivity. For guaranteed timing, drive
+# `workflow_dispatch` from Upstash QStash or Supabase pg_cron instead; the job
+# body is unchanged.
+on:
+  schedule:
+    - cron: '15 * * * *'   # quarter past every hour (offset from other syncs)
+  workflow_dispatch:
+    inputs:
+      user_email:
+        description: 'Scope to one user email (blank = all connected)'
+        required: false
+        default: ''
+
+concurrency:
+  group: slack-sync-${{ github.event.inputs.user_email || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  slack-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: ingestion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install
+        working-directory: worker
+        run: npm install --omit=dev
+      - name: Run Slack sync (capture + vectorize)
+        working-directory: worker
+        env:
+          MODE: slack-sync
+          ONLY_USER: ${{ github.event.inputs.user_email }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          ENTWIN_KEY_SECRET: ${{ secrets.ENTWIN_KEY_SECRET }}
+          CLAUDE_EMBED_MODEL: ${{ secrets.CLAUDE_EMBED_MODEL }}
+          OPENAI_EMBED_MODEL: ${{ secrets.OPENAI_EMBED_MODEL }}
+          GEMINI_EMBED_MODEL: ${{ secrets.GEMINI_EMBED_MODEL }}
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          INGEST_CONCURRENCY: ${{ vars.INGEST_CONCURRENCY }}
+        run: npm start

@@ -1,0 +1,53 @@
+name: slack-backfill
+
+# Dispatched by POST /api/slack/ingest right after a Slack card connects.
+# Runs the full capture + vectorize pass (last 1 month) for the given account.
+on:
+  workflow_dispatch:
+    inputs:
+      user_email:
+        description: 'Scope to one user email (blank = all pending)'
+        required: false
+        default: ''
+      card_id:
+        description: 'slack-workspace (blank = all)'
+        required: false
+        default: ''
+
+concurrency:
+  # Never overlap two syncs for the same account — the second capture would
+  # race the first on the ledger upsert / high-water mark.
+  group: slack-sync-${{ github.event.inputs.user_email }}-${{ github.event.inputs.card_id }}
+  cancel-in-progress: false
+
+jobs:
+  slack-backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: ingestion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install
+        working-directory: worker
+        run: npm install --omit=dev
+      - name: Run Slack sync (capture + vectorize)
+        working-directory: worker
+        env:
+          MODE: slack-sync
+          ONLY_USER: ${{ github.event.inputs.user_email }}
+          ONLY_CARD: ${{ github.event.inputs.card_id }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Slack user token + per-user LLM keys both live in this Redis.
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          ENTWIN_KEY_SECRET: ${{ secrets.ENTWIN_KEY_SECRET }}
+          CLAUDE_EMBED_MODEL: ${{ secrets.CLAUDE_EMBED_MODEL }}
+          OPENAI_EMBED_MODEL: ${{ secrets.OPENAI_EMBED_MODEL }}
+          GEMINI_EMBED_MODEL: ${{ secrets.GEMINI_EMBED_MODEL }}
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          INGEST_CONCURRENCY: ${{ vars.INGEST_CONCURRENCY }}
+        run: npm start

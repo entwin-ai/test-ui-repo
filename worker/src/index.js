@@ -11,12 +11,15 @@ import {
 import { ingestMessage } from './pipeline/ingest.js';
 import { ingestWhatsappBackfill, ingestWhatsappDelta } from './pipeline/whatsapp.js';
 import { captureWhatsapp } from './pipeline/whatsapp-capture.js';
+import { getSlackSession } from './lib/redis-slack.js';
+import { captureSlack, ingestSlackBackfill, ingestSlackDelta } from './pipeline/slack.js';
 import { backfillEntities } from './entity-backfill.js';
 import { runPool } from './lib/pool.js';
 
 // backfill | delta                    -> Gmail
 // whatsapp-sync                       -> WhatsApp: capture (drain offline) + vectorize, one bounded run
 // whatsapp-backfill | whatsapp-delta  -> WhatsApp vectorize-only (advanced/manual)
+// slack-sync                          -> Slack: capture (pull last month) + vectorize, one bounded run
 // entity-backfill                     -> rebuild entity layer from existing notes
 const MODE = process.env.MODE || 'delta';
 const CONCURRENCY = Math.max(1, parseInt(process.env.INGEST_CONCURRENCY || '6', 10));
@@ -188,6 +191,49 @@ async function main() {
         console.log(`[${acct.user_email}/${acct.card_id}] ${MODE} done`);
       } catch (err) {
         console.error(`[${acct.user_email}/${acct.card_id}] wa account failed:`, err.message);
+      }
+    }
+    return;
+  }
+
+  // ---- Slack mode (slack-sync) ---------------------------------------------
+  // Slack is pull-based, so ONE bounded run does both halves: CAPTURE pulls the
+  // last month of messages across every readable conversation into the
+  // slack_message ledger using the user token stored in Redis (written by the
+  // OAuth callback), then VECTORIZE turns the unprocessed rows into memory
+  // notes + entities + embeddings — the same pipeline Gmail and WhatsApp use.
+  if (MODE === 'slack-sync') {
+    const list = await accounts('slack');
+    console.log(`MODE=slack-sync slack-accounts=${list.length}`);
+    for (const acct of list) {
+      try {
+        const session = await getSlackSession(acct.user_email, acct.card_id);
+        if (!session || session.state !== 'connected' || !session.accessToken) {
+          console.log(`[${acct.user_email}/${acct.card_id}] no connected Slack session — skipping`);
+          continue;
+        }
+        const llmConfig = await getLlmConfig(acct.user_email);
+        if (!llmConfig) {
+          console.log(`[${acct.user_email}/${acct.card_id}] no LLM key set — skipping`);
+          continue;
+        }
+        const provider = makeProvider(llmConfig);
+        const token = session.accessToken;
+
+        // 1. CAPTURE: pull last-month messages into the ledger (idempotent).
+        const captured = await captureSlack(acct, token, session.authedUser);
+        console.log(`[${acct.user_email}/slack] captured ${captured} new rows`);
+
+        // 2. VECTORIZE: first run backfills the month, later runs do delta.
+        //    Both only touch processed_at IS NULL rows, so re-runs are safe.
+        if (!acct.backfill_done) {
+          await ingestSlackBackfill(acct, provider, token, runPool, CONCURRENCY);
+        } else {
+          await ingestSlackDelta(acct, provider, token, runPool, CONCURRENCY);
+        }
+        console.log(`[${acct.user_email}/${acct.card_id}] slack-sync done`);
+      } catch (err) {
+        console.error(`[${acct.user_email}/${acct.card_id}] slack-sync failed:`, err.message);
       }
     }
     return;
