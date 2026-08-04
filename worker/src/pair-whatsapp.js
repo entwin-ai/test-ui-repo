@@ -5,6 +5,7 @@ import makeWASocket, {
 import pino from 'pino';
 import { admin } from './lib/supabase.js';
 import { useRedisAuthState, hasCreds, clearAuthState } from './lib/wa-auth-store.js';
+import { publishPairCode, clearPairCode } from './lib/wa-paircode.js';
 
 // ONE-TIME WhatsApp pairing.
 //
@@ -119,10 +120,17 @@ async function main() {
         try {
           const code = await sock.requestPairingCode(WA_PHONE);
           const pretty = code.match(/.{1,4}/g)?.join('-') ?? code;
+          // Publish to Redis so the app's connectors tab can show the code
+          // directly, instead of the user opening the Actions log. Best-effort:
+          // never let a Redis hiccup break pairing.
+          publishPairCode(USER_EMAIL, code, WA_PHONE).catch((e) =>
+            console.error(`pair: could not publish code to Redis: ${e.message}`)
+          );
           console.log('\n==================================================');
           console.log(`  WhatsApp pairing code for ${USER_EMAIL}: ${pretty}`);
           console.log('  On your phone: WhatsApp → Settings → Linked devices');
           console.log('  → Link a device → Link with phone number → enter the code');
+          console.log('  (this code now also appears in the Entwin connectors tab)');
           console.log('==================================================\n');
         } catch (e) {
           if (done) return;
@@ -140,6 +148,8 @@ async function main() {
         done = true;
         clearTimeout(hardTimer);
         await flush().catch(() => {});
+        // Device linked — remove the published code so the UI stops showing it.
+        await clearPairCode(USER_EMAIL).catch(() => {});
         console.log(`pair: ${USER_EMAIL} linked successfully. Credentials saved to Redis.`);
         console.log('pair: the hourly whatsapp-sync job will now ingest messages.');
         try { sock.end(undefined); } catch {}

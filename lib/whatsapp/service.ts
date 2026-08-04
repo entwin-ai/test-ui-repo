@@ -52,6 +52,13 @@ function credsKey(email: string): string {
   return `entwin:wa:creds:${hash}`
 }
 
+// Mirrors the worker's wa-paircode.js key: the pairing job publishes the code
+// here (short TTL) so the connectors tab can show it without opening the log.
+function paircodeKey(email: string): string {
+  const hash = crypto.createHash('sha256').update(email.toLowerCase()).digest('hex').slice(0, 24)
+  return `entwin:wa:paircode:${hash}`
+}
+
 async function redisGet(key: string): Promise<string | null> {
   if (!REDIS_ENABLED) return null
   try {
@@ -77,6 +84,25 @@ async function isLinked(email: string): Promise<boolean> {
     return !!JSON.parse(raw)?.registered
   } catch {
     return false
+  }
+}
+
+/**
+ * The pairing code published by the whatsapp-pair job, if one is currently live
+ * (the key has a short TTL and is deleted on successful link). Returned to the
+ * UI so the connectors tab can display the code directly.
+ */
+async function getPairCode(
+  email: string,
+): Promise<{ code: string; pretty: string; expiresAt: string | null } | null> {
+  const raw = await redisGet(paircodeKey(email))
+  if (!raw) return null
+  try {
+    const p = JSON.parse(raw) as { code?: string; pretty?: string; expiresAt?: string }
+    if (!p?.code) return null
+    return { code: p.code, pretty: p.pretty || p.code, expiresAt: p.expiresAt ?? null }
+  } catch {
+    return null
   }
 }
 
@@ -154,8 +180,8 @@ export async function connect(
     via: 'workflow',
     runsUrl: `https://github.com/${repo}/actions/workflows/whatsapp-pair.yml`,
     message:
-      'Pairing started. Open the running "whatsapp-pair" job in GitHub Actions, copy the pairing code from its log, ' +
-      'and enter it on your phone: WhatsApp → Settings → Linked devices → Link with phone number.',
+      'Pairing started. Your pairing code will appear here in a few seconds — enter it on your phone: ' +
+      'WhatsApp → Settings → Linked devices → Link with phone number.',
   }
 }
 
@@ -194,6 +220,8 @@ export async function disconnect(email: string): Promise<void> {
  */
 export async function status(email: string) {
   const linked = await isLinked(email)
+  // Only surface a live pairing code when NOT yet linked (mid-pairing).
+  const pair = linked ? null : await getPairCode(email)
 
   let totalMessages = 0
   let processedMessages = 0
@@ -227,6 +255,10 @@ export async function status(email: string) {
   return {
     state,
     linked,
+    // Live pairing code (null unless a pairing job is mid-flight). The UI shows
+    // this in the WhatsApp box so the user never opens the Actions log.
+    pairingCode: pair?.pretty ?? null,
+    pairingCodeExpiresAt: pair?.expiresAt ?? null,
     totalMessages,
     processedMessages,
     chats,

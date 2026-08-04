@@ -121,9 +121,23 @@ async function persistRows(rows, floorIso) {
     if (!prev || score(r) > score(prev)) best.set(r.wa_msg_id, r);
   }
   const unique = [...best.values()];
-  const { error } = await admin
+  let { error } = await admin
     .from('whatsapp_message')
     .upsert(unique, { onConflict: 'user_email,wa_msg_id' });
+
+  // Resilience: if the DB/PostgREST schema cache doesn't yet know about a newer
+  // optional column (e.g. is_group before migration 0008 is applied or its
+  // schema cache has reloaded), don't fail the whole run — strip the offending
+  // column and retry once. Names/body/timestamps still land; is_group backfills
+  // later via the migration's UPDATE.
+  if (error && /is_group/.test(error.message) && /schema cache|column/.test(error.message)) {
+    console.warn('whatsapp_message: is_group not in schema cache — retrying without it');
+    const stripped = unique.map(({ is_group, ...rest }) => rest);
+    ({ error } = await admin
+      .from('whatsapp_message')
+      .upsert(stripped, { onConflict: 'user_email,wa_msg_id' }));
+  }
+
   if (error) throw new Error(`whatsapp_message upsert: ${error.message}`);
   return unique.length;
 }
@@ -245,14 +259,22 @@ export async function captureWhatsapp(acct) {
       done = true;
       if (quietTimer) clearTimeout(quietTimer);
       if (hardTimer) clearTimeout(hardTimer);
+      let persistOk = false;
       try {
         captured = await persistRows(buffer, floorIso);
+        persistOk = true;
       } catch (e) {
         console.error(`[${userEmail}/wa] persist failed:`, e.message);
       }
-      // On a completed backfill run, mark the account so future runs use the
-      // light hourly delta path instead of walking history again.
-      if (isBackfill && (reason === 'backfill-complete' || reason === 'quiet')) {
+      // Mark the account backfilled ONLY if the persist actually succeeded AND
+      // we buffered something (an empty first run means we never really synced —
+      // don't burn the one-time backfill pass on a failed/empty run).
+      const backfilledSomething = persistOk && buffer.length > 0;
+      if (
+        isBackfill &&
+        backfilledSomething &&
+        (reason === 'backfill-complete' || reason === 'quiet')
+      ) {
         try {
           await admin
             .from('sync_state')
@@ -266,6 +288,11 @@ export async function captureWhatsapp(acct) {
         } catch (e) {
           console.error(`[${userEmail}/wa] sync_state update failed:`, e.message);
         }
+      } else if (isBackfill && !backfilledSomething) {
+        console.warn(
+          `[${userEmail}/wa] backfill NOT marked complete (persistOk=${persistOk}, ` +
+          `buffered=${buffer.length}) — will retry on next run`
+        );
       }
       try {
         await flush(); // write rotated creds/keys back to Redis

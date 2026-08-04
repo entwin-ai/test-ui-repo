@@ -325,6 +325,7 @@ function WhatsAppModal({
   const [via, setVia] = useState<'workflow' | 'local' | null>(null)
   const [runsUrl, setRunsUrl] = useState<string | null>(null)
   const [instruction, setInstruction] = useState<string>('')
+  const [pairingCode, setPairingCode] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -376,8 +377,11 @@ function WhatsAppModal({
         const res = await fetch('/api/whatsapp/status')
         if (!res.ok) return
         const st = await res.json()
+        // Surface the code as soon as the pairing job publishes it.
+        if (st.pairingCode) setPairingCode(st.pairingCode as string)
         if (st.linked || st.state === 'connected') {
           if (pollRef.current) clearInterval(pollRef.current)
+          setPairingCode(null)
           setPhase('connected')
           finishLinked()
         }
@@ -450,15 +454,37 @@ function WhatsAppModal({
                 <p className="wa-lead">Run this once to link the device, then enter the printed code on your phone:</p>
                 <pre className="wa-cmd">{instruction}</pre>
               </>
+            ) : pairingCode ? (
+              <>
+                <p className="wa-lead">
+                  Enter this pairing code on your phone: WhatsApp → Settings → Linked devices → Link with phone
+                  number.
+                </p>
+                <div className="wa-paircode" aria-label="WhatsApp pairing code">
+                  {pairingCode.split('').map((ch, i) =>
+                    ch === '-' ? (
+                      <span key={i} className="wa-paircode-sep">–</span>
+                    ) : (
+                      <span key={i} className="wa-paircode-ch">{ch}</span>
+                    ),
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className="wa-link wa-copy"
+                  onClick={() => navigator.clipboard?.writeText(pairingCode.replace(/-/g, '')).catch(() => {})}
+                >
+                  Copy code
+                </button>
+              </>
             ) : (
               <>
                 <p className="wa-lead">
-                  Pairing has started in a background job. Open its log, copy the 8-character pairing code, and
-                  enter it on your phone: WhatsApp → Settings → Linked devices → Link with phone number.
+                  Pairing has started in a background job. Your code will appear here in a few seconds…
                 </p>
                 {runsUrl && (
                   <a className="wa-link" href={runsUrl} target="_blank" rel="noreferrer">
-                    Open the pairing job ↗
+                    Or open the pairing job log ↗
                   </a>
                 )}
               </>

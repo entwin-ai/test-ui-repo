@@ -22,3 +22,8 @@ update whatsapp_message
 -- Helpful for chat-scoped lookups / per-chat history checks.
 create index if not exists whatsapp_message_chat_ts_idx
   on whatsapp_message (user_email, chat_id, msg_timestamp);
+
+-- Force PostgREST to reload its schema cache immediately so the new column is
+-- visible to the API layer without waiting for the periodic reload (this is the
+-- "Could not find the 'is_group' column ... in the schema cache" symptom).
+notify pgrst, 'reload schema';

@@ -40,7 +40,27 @@ Then run whatsapp-sync (dispatch), and: select count(*) from whatsapp_message;
   WA_HISTORY_ROUNDS=12       # max fetch rounds per chat (time-budget guard)
   WA_BACKFILL_DRAIN_MS=300000  # first-ingestion drain ceiling (5 min)
 
+### KNOWN: apply migration 0008 BEFORE running, or is_group errors zero the run.
+### The persist now retries without is_group on a stale schema cache, and
+### backfill_done is only stamped when rows actually persist.
+
 ### To re-run the initial ingestion after deploying
 Reset the account so it takes the backfill path again, then dispatch sync:
   update sync_state set backfill_done=false, wa_backfill_after=null
     where user_email='nishitghosh@gmail.com' and channel='whatsapp';
+
+## Update — pairing code shown in the connectors tab (no more log-diving)
+- worker/src/lib/wa-paircode.js (NEW) — publishes the code to Redis
+  (entwin:wa:paircode:<hash>, TTL = pairing timeout), cleared on link.
+- worker/src/pair-whatsapp.js — publishes the code when generated, clears on
+  successful `open`. Log still prints it as a fallback.
+- lib/whatsapp/service.ts — status() now reads the code and returns
+  `pairingCode` / `pairingCodeExpiresAt` (only while unlinked).
+- app/page.tsx — the WhatsApp modal polls status, and when a code is present
+  renders it as digit tiles with a Copy button; the Actions-log link is now a
+  fallback shown only until the code arrives.
+- app/globals.css — .wa-paircode styles.
+
+No new secrets/inputs. Uses the existing Upstash Redis env already set for the
+pair/sync jobs. Code appears within ~3–7s of dispatch (job spin-up + 3s request
+delay + the UI's 4s poll).
