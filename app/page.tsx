@@ -63,6 +63,35 @@ const BRAND_ICONS: Record<string, JSX.Element> = {
       <path fill="#e01e5a" d="M8.75 18.75A1.75 1.75 0 0 1 7 20.5a1.75 1.75 0 0 1-1.75-1.75v-4.5A1.75 1.75 0 0 1 7 12.5h1.75v6.25z" />
     </svg>
   ),
+  animatics: (
+    <svg viewBox="0 0 48 48">
+      <defs>
+        <linearGradient id="animaticsTile" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor="#1FB184" />
+          <stop offset="55%" stopColor="#0F6E56" />
+          <stop offset="100%" stopColor="#084438" />
+        </linearGradient>
+        <linearGradient id="animaticsFilm" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor="#ffffff" />
+          <stop offset="100%" stopColor="#E1F5EE" />
+        </linearGradient>
+      </defs>
+      <rect x="0" y="0" width="48" height="48" rx="11" fill="url(#animaticsTile)" />
+      <rect x="0" y="0" width="48" height="24" rx="11" fill="#ffffff" opacity="0.06" />
+      <g transform="translate(24,25.5)">
+        <path d="M0,-15.5 L9.2,13.4 L2.9,13.4 L0,5.5 L-2.9,13.4 L-9.2,13.4 Z" fill="url(#animaticsFilm)" />
+        <rect x="-1.9" y="7.1" width="3.8" height="2.6" rx="0.7" fill="url(#animaticsFilm)" />
+        <circle cx="-6.4" cy="11.2" r="0.9" fill="#0F6E56" />
+        <circle cx="-4.1" cy="4.1" r="0.9" fill="#0F6E56" />
+        <circle cx="6.4" cy="11.2" r="0.9" fill="#0F6E56" />
+        <circle cx="4.1" cy="4.1" r="0.9" fill="#0F6E56" />
+        <g transform="translate(0,-2.6)">
+          <path d="M-4.7,-1 h9.4 a2.1,2.1 0 0 1 2.1,2.1 v2.9 a2.1,2.1 0 0 1 -2.1,2.1 h-6.3 l-2.6,2.3 v-2.3 h-0.5 a2.1,2.1 0 0 1 -2.1,-2.1 v-2.9 a2.1,2.1 0 0 1 2.1,-2.1 Z" fill="#FAC775" />
+          <path d="M-0.9,0.7 L3,3 L-0.9,5.3 Z" fill="#084438" />
+        </g>
+      </g>
+    </svg>
+  ),
 }
 
 interface GmailScan {
@@ -124,7 +153,7 @@ const INITIAL_CONNECTORS: Connector[] = [
   { name: 'Google Drive — Professional', service: 'drive', icon: 'drive', desc: 'Document ingestion for the vault.', connected: false, connectedEmail: null },
   { name: 'Google Calendar', service: null, icon: 'calendar', desc: 'Meeting and scheduling context.', connected: false, connectedEmail: null },
   { name: 'WhatsApp', service: 'whatsapp', code: 'WA', desc: 'Personal messages, vectorized into cross-channel memory.', connected: false, connectedEmail: null, wa: null },
-  { name: 'Telegram', service: null, code: 'TG', desc: 'Personal messages, facet-decomposed.', connected: false, connectedEmail: null },
+  { name: 'Animatics', service: null, icon: 'animatics', desc: 'Personal messages, facet-decomposed.', connected: false, connectedEmail: null },
   { name: 'Slack', service: 'slack', icon: 'slack', slackCardId: 'slack-workspace', desc: 'Work channel ingestion — pulls the last 1 month of Slack chats.', connected: false, connectedEmail: null, slackScan: null },
   { name: 'Browser history', service: null, code: 'BH', desc: 'Search activity as raw source.', connected: false, connectedEmail: null },
 ]
