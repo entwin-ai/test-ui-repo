@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireUser } from '@/lib/gmail/route-helpers'
-import { getOwnedJob, saveJob } from '@/lib/animatics/store'
+import { getOwnedJob, saveJob, saveHeadshot } from '@/lib/animatics/store'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 30
 
 const ALLOWED_IMAGE = ['image/png', 'image/jpeg', 'image/webp']
-const MAX_BYTES = 5 * 1024 * 1024 // 5 MB
+// Kept well under Vercel's ~4.5 MB serverless body limit. The client downscales
+// headshots before upload, so this is a safety net, not the primary control.
+const MAX_BYTES = 3 * 1024 * 1024 // 3 MB
 
 /**
  * POST /api/animatics/headshot   (multipart: jobId, characterId, image)
@@ -52,10 +54,16 @@ export async function POST(req: NextRequest) {
   const character = job.characters.find((c) => c.id === characterId)
   if (!character) return NextResponse.json({ error: 'Character not found.' }, { status: 404 })
 
-  character.headshot = `data:${image.type};base64,${bytes.toString('base64')}`
+  // Store the image bytes under a SEPARATE Redis key; the job blob only records
+  // that a headshot exists. This keeps each write small and avoids blowing past
+  // request/value size limits when there are many characters.
+  const dataUrl = `data:${image.type};base64,${bytes.toString('base64')}`
+  await saveHeadshot(job.id, characterId, dataUrl)
+
+  character.hasHeadshot = true
   character.headshotMime = image.type
 
-  const allHaveHeadshots = job.characters.every((c) => c.headshot)
+  const allHaveHeadshots = job.characters.every((c) => c.hasHeadshot)
   job.status = allHaveHeadshots ? 'PARSED' : 'AWAITING_HEADSHOTS'
   // PARSED here means "ready to generate" — all headshots collected.
 
@@ -65,6 +73,6 @@ export async function POST(req: NextRequest) {
     ok: true,
     status: job.status,
     readyForScreenplay: allHaveHeadshots,
-    characters: job.characters.map((c) => ({ id: c.id, hasHeadshot: !!c.headshot })),
+    characters: job.characters.map((c) => ({ id: c.id, hasHeadshot: c.hasHeadshot })),
   })
 }

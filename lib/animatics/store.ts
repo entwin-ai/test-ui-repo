@@ -49,8 +49,13 @@ export interface Character {
   name: string
   description: string // physical description from the LLM
   role: string //        e.g. protagonist, antagonist, supporting
-  /** base64 data URL of the uploaded headshot, or null until uploaded. */
-  headshot: string | null
+  /**
+   * Whether a headshot has been uploaded. The image bytes are stored under a
+   * SEPARATE Redis key (see headshot helpers below) so the job blob stays
+   * small — base64 images inside the job would blow past request/value size
+   * limits once there are several characters.
+   */
+  hasHeadshot: boolean
   headshotMime: string | null
 }
 
@@ -94,6 +99,9 @@ function jobKey(id: string): string {
 function ownerIndexKey(email: string): string {
   const hash = crypto.createHash('sha256').update(email.toLowerCase()).digest('hex').slice(0, 24)
   return `entwin:animatics:owner:${hash}`
+}
+function headshotKey(jobId: string, characterId: string): string {
+  return `entwin:animatics:headshot:${jobId}:${characterId}`
 }
 
 const TTL_SECONDS = 30 * 24 * 60 * 60 // 30 days
@@ -148,4 +156,26 @@ export async function getOwnedJob(id: string, owner: string): Promise<Job | null
   const job = await getJob(id)
   if (!job || job.owner.toLowerCase() !== owner.toLowerCase()) return null
   return job
+}
+
+// --- headshots stored as separate keys (kept out of the job blob) ----------
+
+/**
+ * Store one character's headshot as its own Redis key. Keeping images out of
+ * the job blob is what makes multi-character uploads work: each write is small
+ * and no single Redis value grows unbounded.
+ */
+export async function saveHeadshot(
+  jobId: string,
+  characterId: string,
+  dataUrl: string,
+): Promise<void> {
+  await redisCmd(['SET', headshotKey(jobId, characterId), dataUrl, 'EX', TTL_SECONDS])
+}
+
+export async function getHeadshot(
+  jobId: string,
+  characterId: string,
+): Promise<string | null> {
+  return (await redisCmd(['GET', headshotKey(jobId, characterId)])) as string | null
 }

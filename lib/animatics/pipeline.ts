@@ -95,7 +95,7 @@ export async function extractCharacters(email: string, novel: string): Promise<C
     role: ['protagonist', 'antagonist', 'supporting', 'minor'].includes(c.role)
       ? c.role
       : 'supporting',
-    headshot: null,
+    hasHeadshot: false,
     headshotMime: null,
   }))
 }

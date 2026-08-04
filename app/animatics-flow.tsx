@@ -43,6 +43,56 @@ function statusToStep(job: JobState | null): Step {
   return 'characters'
 }
 
+/**
+ * Read a fetch Response safely. If the server returned a non-JSON body (e.g. a
+ * platform "Request Entity Too Large" or a proxy error page), surface a clean
+ * message instead of a cryptic "Unexpected token" JSON parse error.
+ */
+async function readResponse(
+  r: Response,
+): Promise<{ ok: boolean; data: Record<string, unknown>; error?: string }> {
+  const text = await r.text()
+  let data: Record<string, unknown> = {}
+  try {
+    data = text ? JSON.parse(text) : {}
+  } catch {
+    // Non-JSON response — build a human message from status.
+    const snippet = text.slice(0, 120).replace(/\s+/g, ' ').trim()
+    const msg =
+      r.status === 413
+        ? 'That image is too large to upload. Please choose a smaller headshot.'
+        : `Server error (${r.status})${snippet ? `: ${snippet}` : ''}`
+    return { ok: false, data: {}, error: msg }
+  }
+  return { ok: r.ok, data, error: r.ok ? undefined : (data.error as string) }
+}
+
+/**
+ * Downscale/re-encode a headshot in the browser before upload so payloads stay
+ * small and well under the serverless body limit. Faces don't need to be huge —
+ * 640px on the long edge is plenty to drive animation. Returns a JPEG Blob.
+ */
+async function downscaleImage(file: File, maxEdge = 640, quality = 0.85): Promise<Blob> {
+  const bitmap = await createImageBitmap(file).catch(() => null)
+  if (!bitmap) return file // fallback: send original if decode fails
+  const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height))
+  const w = Math.round(bitmap.width * scale)
+  const h = Math.round(bitmap.height * scale)
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return file
+  ctx.drawImage(bitmap, 0, 0, w, h)
+  return await new Promise<Blob>((resolve) => {
+    canvas.toBlob(
+      (blob) => resolve(blob || file),
+      'image/jpeg',
+      quality,
+    )
+  })
+}
+
 export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
   const [job, setJob] = useState<JobState | null>(null)
   const [step, setStep] = useState<Step>('upload')
@@ -98,20 +148,20 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
       const form = new FormData()
       form.append('story', file)
       const r = await fetch('/api/animatics/parse', { method: 'POST', body: form })
-      const d = await r.json()
-      if (!r.ok) {
-        setError(d.error || 'Upload failed.')
+      const { ok, data: d, error: err } = await readResponse(r)
+      if (!ok) {
+        setError(err || 'Upload failed.')
         if (d.needsKey) setNeedsKey(true)
         return
       }
       setJob({
-        id: d.jobId,
-        status: d.status,
-        characters: d.characters,
+        id: d.jobId as string,
+        status: d.status as string,
+        characters: d.characters as CharacterView[],
         hasScreenplay: false,
         screenplayProse: null,
         shotCount: 0,
-        parseStats: d.parseStats,
+        parseStats: d.parseStats as Record<string, number>,
         documentUrl: null,
       })
       setStep('characters')
@@ -130,21 +180,27 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
     setError(null)
     setBusy(true)
     try {
+      // Shrink in the browser so the request stays small and never hits the
+      // serverless body-size limit (the original cause of the JSON parse error).
+      const scaled = await downscaleImage(file)
       const form = new FormData()
       form.append('jobId', job.id)
       form.append('characterId', characterId)
-      form.append('image', file)
+      form.append('image', scaled, 'headshot.jpg')
       const r = await fetch('/api/animatics/headshot', { method: 'POST', body: form })
-      const d = await r.json()
-      if (!r.ok) {
-        setError(d.error || 'Headshot upload failed.')
+      const { ok, data, error: err } = await readResponse(r)
+      if (!ok) {
+        setError(err || 'Headshot upload failed.')
         return
       }
+      void data
       await refreshStatus(job.id)
     } catch (err) {
       setError((err as Error).message)
     } finally {
       setBusy(false)
+      // reset the input so re-selecting the same file re-triggers change
+      if (headshotRefs.current[characterId]) headshotRefs.current[characterId]!.value = ''
     }
   }
 
@@ -162,9 +218,9 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jobId: job.id }),
       })
-      const d = await r.json()
-      if (!r.ok) {
-        setError(d.error || 'Screenplay generation failed.')
+      const { ok, data: d, error: err } = await readResponse(r)
+      if (!ok) {
+        setError(err || 'Screenplay generation failed.')
         if (d.needsKey) setNeedsKey(true)
         return
       }
@@ -189,9 +245,12 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jobId: job.id, prose: editedProse }),
       })
-      const d = await r.json()
-      if (!r.ok) setError(d.error || 'Could not save edits.')
-      else await refreshStatus(job.id)
+      const { ok, data: d, error: err } = await readResponse(r)
+      if (!ok) setError(err || 'Could not save edits.')
+      else {
+        void d
+        await refreshStatus(job.id)
+      }
     } catch (err) {
       setError((err as Error).message)
     } finally {
@@ -210,11 +269,12 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jobId: job.id, editedProse }),
       })
-      const d = await r.json()
-      if (!r.ok) {
-        setError(d.error || 'Approval failed.')
+      const { ok, data: d, error: err } = await readResponse(r)
+      if (!ok) {
+        setError(err || 'Approval failed.')
         return
       }
+      void d
       await refreshStatus(job.id)
       setStep('approved')
     } catch (err) {

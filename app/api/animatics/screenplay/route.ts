@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
   const job = await getOwnedJob(jobId, auth.email)
   if (!job) return NextResponse.json({ error: 'Job not found.' }, { status: 404 })
 
-  const missing = job.characters.filter((c) => !c.headshot)
+  const missing = job.characters.filter((c) => !c.hasHeadshot)
   if (missing.length) {
     return NextResponse.json(
       { error: `Upload a headshot for every character first (${missing.length} remaining).` },

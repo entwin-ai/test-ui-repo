@@ -34,7 +34,7 @@ export async function GET(req: NextRequest) {
         name: c.name,
         description: c.description,
         role: c.role,
-        hasHeadshot: !!c.headshot,
+        hasHeadshot: c.hasHeadshot,
       })),
       hasScreenplay: !!job.screenplayProse,
       screenplayProse: job.screenplayProse,
