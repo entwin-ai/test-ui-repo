@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
-    "@whiskeysockets/baileys": "^7.0.0-rc13",
+    "@whiskeysockets/baileys": "^7.0.0-rc.14",
     "@hapi/boom": "^10.0.1",
     "html-to-text": "^9.0.5",
     "pino": "^10.3.1"

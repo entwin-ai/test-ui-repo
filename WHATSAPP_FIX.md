@@ -21,3 +21,26 @@ Read the printed code, enter it on the phone, let the job finish (it now rides
 through the restart instead of dying at 428).
 
 Then run whatsapp-sync (dispatch), and: select count(*) from whatsapp_message;
+
+## Update — sender names + consistent 1-month per-chat backfill
+- worker/src/lib/wa-names.js (NEW) — name registry: resolves chat_name (group
+  subject / contact) and sender_name (per message, always populated) from the
+  contacts + chats directories, not the last speaker's pushName.
+- worker/src/pipeline/whatsapp-capture.js — wires the registry into all name
+  sources; on a first (backfill) ingestion, walks EACH chat back ~1 month via
+  on-demand history (sock.fetchMessageHistory) until every chat crosses the
+  floor; upsert now UPDATES name columns as they resolve. Marks backfill_done
+  + wa_backfill_after when complete. Backfill runs get a longer drain ceiling.
+- supabase/migrations/0008_whatsapp_names.sql (NEW) — adds is_group; backfills it.
+- worker/package.json — baileys pinned to ^7.0.0-rc.14 (has fetchMessageHistory).
+
+### Env knobs (optional)
+  WA_BACKFILL_DAYS=30        # per-chat history depth on first ingestion
+  WA_HISTORY_PAGE=50         # messages per on-demand fetch
+  WA_HISTORY_ROUNDS=12       # max fetch rounds per chat (time-budget guard)
+  WA_BACKFILL_DRAIN_MS=300000  # first-ingestion drain ceiling (5 min)
+
+### To re-run the initial ingestion after deploying
+Reset the account so it takes the backfill path again, then dispatch sync:
+  update sync_state set backfill_done=false, wa_backfill_after=null
+    where user_email='nishitghosh@gmail.com' and channel='whatsapp';

@@ -2,11 +2,13 @@ import makeWASocket, {
   Browsers,
   fetchLatestBaileysVersion,
   DisconnectReason,
+  isJidGroup,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import { admin } from '../lib/supabase.js';
 import { useRedisAuthState, hasCreds, clearAuthState } from '../lib/wa-auth-store.js';
+import { createNameRegistry } from '../lib/wa-names.js';
 
 // BOUNDED WhatsApp capture — the batch replacement for the persistent bridge.
 //
@@ -31,6 +33,18 @@ const logger = pino({ level: process.env.WA_LOG_LEVEL || 'silent' });
 const MAX_DRAIN_MS = Number(process.env.WA_DRAIN_MS || 90_000); // hard ceiling
 const QUIET_MS = Number(process.env.WA_QUIET_MS || 8_000); // idle => backlog drained
 
+// Initial-ingestion history depth: every chat is walked back to at least this
+// far. 1 month by default, overridable. Used both as the persist floor and as
+// the target for the per-chat on-demand history walk below.
+const BACKFILL_DAYS = Number(process.env.WA_BACKFILL_DAYS || 30);
+// On-demand history: how many messages to request per chat per fetch, and how
+// many fetch rounds to allow before giving up on a chat (protects the run's
+// time budget on very chatty conversations).
+const HISTORY_PAGE = Number(process.env.WA_HISTORY_PAGE || 50);
+const MAX_HISTORY_ROUNDS = Number(process.env.WA_HISTORY_ROUNDS || 12);
+// A first-ever ingestion legitimately needs longer than the hourly delta drain.
+const BACKFILL_DRAIN_MS = Number(process.env.WA_BACKFILL_DRAIN_MS || 300_000); // 5 min
+
 const isStatus = (jid) => jid === 'status@broadcast';
 
 function extractText(m) {
@@ -48,45 +62,68 @@ function extractText(m) {
   );
 }
 
-function toRow(userEmail, m) {
+function msgTsMs(m) {
+  const raw = typeof m.messageTimestamp === 'number' ? m.messageTimestamp : Number(m.messageTimestamp || 0);
+  return raw ? raw * 1000 : 0;
+}
+
+// Build a ledger row, resolving names through the registry. `names` is a
+// createNameRegistry() instance; `selfName` is the account owner's own display
+// name (for `fromMe` messages).
+function toRow(userEmail, m, names, selfName) {
   const text = extractText(m);
   if (!text) return null;
   const key = m.key;
   if (!key?.id || !key.remoteJid || isStatus(key.remoteJid)) return null;
-  const tsRaw = typeof m.messageTimestamp === 'number' ? m.messageTimestamp : Number(m.messageTimestamp || 0);
-  if (!tsRaw) return null;
+  const tsMs = msgTsMs(m);
+  if (!tsMs) return null;
+
+  const chatJid = key.remoteJid;
+  const isGroup = isJidGroup(chatJid);
+  // sender jid: in a group it's the participant; in a 1:1 it's the chat itself
+  // (or self, for fromMe).
+  const senderJid = key.fromMe
+    ? 'me'
+    : key.participant || chatJid;
+
   return {
     user_email: userEmail,
     card_id: 'whatsapp',
     wa_msg_id: key.id,
-    chat_id: key.remoteJid,
-    chat_name: m.pushName || null,
-    sender: key.participant || key.remoteJid,
-    sender_name: m.pushName || null,
+    chat_id: chatJid,
+    // Group subject vs the other party's name — never the last speaker's name.
+    chat_name: names.resolveChatName(chatJid),
+    sender: senderJid,
+    // The actual person who sent THIS message, always populated.
+    sender_name: names.resolveSenderName(m, selfName),
     from_me: !!key.fromMe,
-    msg_timestamp: new Date(tsRaw * 1000).toISOString(),
+    msg_timestamp: new Date(tsMs).toISOString(),
     body: text,
+    is_group: isGroup,
   };
 }
 
-// Persist a batch of raw rows, honoring the 1-month floor for this account.
-// Idempotent: upsert on (user_email, wa_msg_id) with ignoreDuplicates, so the
-// overlap between offline-sync replay and any prior run never double-inserts.
+// Persist a batch of raw rows, honoring the history floor for this account.
+// Idempotent on (user_email, wa_msg_id). We do NOT ignoreDuplicates here: names
+// improve as the registry fills during a run (a later contacts.upsert can name a
+// chat that was null earlier), so on conflict we UPDATE the name columns while
+// leaving body/timestamp intact.
 async function persistRows(rows, floorIso) {
   if (rows.length === 0) return 0;
   const filtered = floorIso ? rows.filter((r) => r.msg_timestamp >= floorIso) : rows;
   if (filtered.length === 0) return 0;
-  // De-dupe within the batch by wa_msg_id (offline sync can repeat).
-  const seen = new Set();
-  const unique = [];
+  // De-dupe within the batch by wa_msg_id, keeping the row with the most
+  // resolved names (offline sync + on-demand history can repeat a message).
+  const best = new Map();
+  const score = (r) => (r.chat_name ? 1 : 0) + (r.sender_name ? 1 : 0);
   for (const r of filtered) {
-    if (seen.has(r.wa_msg_id)) continue;
-    seen.add(r.wa_msg_id);
-    unique.push(r);
+    const prev = best.get(r.wa_msg_id);
+    if (!prev || score(r) > score(prev)) best.set(r.wa_msg_id, r);
   }
+  const unique = [...best.values()];
   const { error } = await admin
     .from('whatsapp_message')
-    .upsert(unique, { onConflict: 'user_email,wa_msg_id', ignoreDuplicates: true });
+    .upsert(unique, { onConflict: 'user_email,wa_msg_id' });
   if (error) throw new Error(`whatsapp_message upsert: ${error.message}`);
   return unique.length;
 }
@@ -107,10 +144,20 @@ export async function captureWhatsapp(acct) {
     return { captured: 0, notPaired: true };
   }
 
-  const floorIso =
-    acct.wa_backfill_after || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  // Is this the first (backfill) ingestion for this account, or an hourly delta?
+  const isBackfill = !acct.backfill_done;
+
+  // The history floor: 1 month by default. On a first ingestion this is also the
+  // target depth the per-chat walk drives every chat back to.
+  const floorMs =
+    (acct.wa_backfill_after ? Date.parse(acct.wa_backfill_after) : NaN) ||
+    Date.now() - BACKFILL_DAYS * 24 * 60 * 60 * 1000;
+  const floorIso = new Date(floorMs).toISOString();
+
+  const drainCeiling = isBackfill ? BACKFILL_DRAIN_MS : MAX_DRAIN_MS;
 
   const { state, saveCreds, flush } = await useRedisAuthState(userEmail);
+  const names = createNameRegistry();
 
   const buffer = [];
   let captured = 0;
@@ -122,16 +169,76 @@ export async function captureWhatsapp(acct) {
     let reconnects = 0;
     const MAX_RECONNECTS = 5;
     let sock = null;
+    let selfName = null;
+
+    // Per-chat bookkeeping for the on-demand backfill walk. For each chat we
+    // remember the OLDEST message key/timestamp we've seen, and how many
+    // on-demand rounds we've spent on it.
+    const oldest = new Map(); // chatJid -> { key, tsMs }
+    const rounds = new Map(); // chatJid -> number
+    const satisfied = new Set(); // chats that reached the floor or ran dry
+
+    const noteOldest = (m) => {
+      const key = m?.key;
+      const chatJid = key?.remoteJid;
+      const tsMs = msgTsMs(m);
+      if (!chatJid || !tsMs || isStatus(chatJid)) return;
+      const cur = oldest.get(chatJid);
+      if (!cur || tsMs < cur.tsMs) oldest.set(chatJid, { key, tsMs });
+    };
 
     const collect = (msgs) => {
       for (const m of msgs) {
-        const row = toRow(userEmail, m);
+        names.ingestMessage(m);
+        noteOldest(m);
+        const row = toRow(userEmail, m, names, selfName);
         if (row) buffer.push(row);
       }
-      // Reset the quiet timer: as long as messages keep arriving, keep waiting.
-      if (quietTimer) clearTimeout(quietTimer);
-      quietTimer = setTimeout(() => finish('quiet'), QUIET_MS);
+      bumpQuiet();
     };
+
+    function bumpQuiet() {
+      if (quietTimer) clearTimeout(quietTimer);
+      quietTimer = setTimeout(onQuiet, QUIET_MS);
+    }
+
+    // When the stream goes quiet: on a delta run we're done. On a backfill run
+    // we first try to pull each chat further back toward the floor via
+    // on-demand history; only when every chat is satisfied do we finish.
+    async function onQuiet() {
+      if (done) return;
+      if (!isBackfill) return finish('quiet');
+      const requested = await driveBackfill();
+      if (requested === 0) return finish('backfill-complete');
+      // Requested more history for at least one chat — wait for it to arrive,
+      // which will bump the quiet timer again when it does. Set a fallback in
+      // case the phone returns nothing.
+      bumpQuiet();
+    }
+
+    // For every chat whose oldest message is still newer than the floor, ask
+    // WhatsApp for an older page. Returns how many on-demand requests we issued.
+    async function driveBackfill() {
+      if (!sock || typeof sock.fetchMessageHistory !== 'function') return 0;
+      let requested = 0;
+      for (const [chatJid, o] of oldest.entries()) {
+        if (satisfied.has(chatJid)) continue;
+        // Reached a month back for this chat — done.
+        if (o.tsMs <= floorMs) { satisfied.add(chatJid); continue; }
+        const r = rounds.get(chatJid) || 0;
+        if (r >= MAX_HISTORY_ROUNDS) { satisfied.add(chatJid); continue; }
+        rounds.set(chatJid, r + 1);
+        try {
+          // Pull older messages before the oldest we currently hold.
+          await sock.fetchMessageHistory(HISTORY_PAGE, o.key, o.tsMs);
+          requested += 1;
+        } catch (e) {
+          // Chat can't be paged further (e.g. no more server history) — stop.
+          satisfied.add(chatJid);
+        }
+      }
+      return requested;
+    }
 
     const finish = async (reason) => {
       if (done) return;
@@ -143,6 +250,23 @@ export async function captureWhatsapp(acct) {
       } catch (e) {
         console.error(`[${userEmail}/wa] persist failed:`, e.message);
       }
+      // On a completed backfill run, mark the account so future runs use the
+      // light hourly delta path instead of walking history again.
+      if (isBackfill && (reason === 'backfill-complete' || reason === 'quiet')) {
+        try {
+          await admin
+            .from('sync_state')
+            .update({
+              backfill_done: true,
+              wa_backfill_after: floorIso,
+              wa_last_processed_ts: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', acct.id);
+        } catch (e) {
+          console.error(`[${userEmail}/wa] sync_state update failed:`, e.message);
+        }
+      }
       try {
         await flush(); // write rotated creds/keys back to Redis
       } catch (e) {
@@ -151,12 +275,16 @@ export async function captureWhatsapp(acct) {
       try {
         sock?.end(undefined); // close socket; do NOT logout (keeps the link)
       } catch {}
-      console.log(`[${userEmail}/wa] capture done (${reason}) — ${captured} rows`);
+      const sizes = names._sizes();
+      console.log(
+        `[${userEmail}/wa] capture done (${reason}) — ${captured} rows, ` +
+        `${oldest.size} chats, names[contacts=${sizes.contacts},chats=${sizes.chats}]`
+      );
       resolve({ captured });
     };
 
     // One overall ceiling across the whole run, including reconnects.
-    hardTimer = setTimeout(() => finish('ceiling'), MAX_DRAIN_MS);
+    hardTimer = setTimeout(() => finish('ceiling'), drainCeiling);
 
     async function connect() {
       const { version } = await fetchLatestBaileysVersion();
@@ -167,14 +295,32 @@ export async function captureWhatsapp(acct) {
         logger,
         printQRInTerminal: false,
         markOnlineOnConnect: false, // stay passive; don't change presence
-        // Full history only matters on a first connect after pairing. On
-        // subsequent hourly runs WhatsApp just replays what we missed.
-        syncFullHistory: !acct.backfill_done,
+        // Ask the phone to push full history on a first connect; on hourly
+        // deltas we only need what we missed.
+        syncFullHistory: isBackfill,
         browser: Browsers.ubuntu('Chrome'),
       });
 
-      sock.ev.on('creds.update', saveCreds);
-      sock.ev.on('messaging-history.set', ({ messages }) => collect(messages || []));
+      selfName = sock.authState?.creds?.me?.name || selfName;
+
+      sock.ev.on('creds.update', () => {
+        selfName = sock.authState?.creds?.me?.name || selfName;
+        return saveCreds();
+      });
+
+      // History payloads carry contacts + chats directories AND messages.
+      sock.ev.on('messaging-history.set', ({ contacts, chats, messages }) => {
+        names.ingestContacts(contacts || []);
+        names.ingestChats(chats || []);
+        collect(messages || []);
+      });
+      // Live/near-live directory updates.
+      sock.ev.on('contacts.upsert', (contacts) => names.ingestContacts(contacts || []));
+      sock.ev.on('contacts.update', (contacts) => names.ingestContacts(contacts || []));
+      sock.ev.on('chats.upsert', (chats) => names.ingestChats(chats || []));
+      sock.ev.on('groups.upsert', (groups) => {
+        for (const g of groups || []) names.ingestGroupMetadata(g);
+      });
       sock.ev.on('messages.upsert', ({ messages }) => collect(messages || []));
 
       sock.ev.on('connection.update', (u) => {
@@ -182,10 +328,11 @@ export async function captureWhatsapp(acct) {
         const { connection, lastDisconnect } = u;
 
         if (connection === 'open') {
+          selfName = sock.authState?.creds?.me?.name || selfName;
           // Connected. Start the quiet clock; offline-sync events will keep
-          // pushing it out until the backlog is drained.
-          if (quietTimer) clearTimeout(quietTimer);
-          quietTimer = setTimeout(() => finish('quiet'), QUIET_MS);
+          // pushing it out until the backlog is drained (and, on backfill, until
+          // the per-chat history walk is satisfied).
+          bumpQuiet();
           return;
         }
 
@@ -195,8 +342,6 @@ export async function captureWhatsapp(acct) {
             : undefined);
 
           if (code === DisconnectReason.loggedOut) {
-            // The user unlinked the device from their phone. Purge creds so we
-            // don't retry forever, and mark the account for re-pair.
             clearAuthState(userEmail).catch(() => {});
             admin
               .from('sync_state')
@@ -208,11 +353,8 @@ export async function captureWhatsapp(acct) {
           }
 
           // WhatsApp requests a stream RESTART (515) right after a fresh pairing
-          // and occasionally drops (428) before the session opens. On a bounded
-          // run we MUST reconnect through these — otherwise the first capture
-          // never reaches `open`, never receives the offline-sync history, and
-          // drains nothing (green job, zero rows). Reuse the shared registered
-          // auth state; it carries the session to `open`.
+          // and occasionally drops (428) before the session opens. Reconnect
+          // through these, reusing the shared registered auth state.
           if (code === DisconnectReason.restartRequired || code === 515 || code === 428) {
             try { sock?.end(undefined); } catch {}
             if (reconnects >= MAX_RECONNECTS) {
@@ -224,8 +366,6 @@ export async function captureWhatsapp(acct) {
             return;
           }
 
-          // Any other close: persist what we have and let the next hourly run
-          // pick up the rest from the offline buffer.
           finish(`closed-${code ?? 'unknown'}`);
         }
       });
