@@ -1,18 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireUser } from '@/lib/gmail/route-helpers'
 import { getOwnedJob, saveJob } from '@/lib/animatics/store'
-import { generateScreenplay, NoLlmKeyError } from '@/lib/animatics/pipeline'
+import { generateSegment, segmentNovel, NoLlmKeyError } from '@/lib/animatics/pipeline'
 import { buildScreenplayDocx } from '@/lib/animatics/docx'
 
 export const dynamic = 'force-dynamic'
-export const maxDuration = 120
+export const maxDuration = 300 // allow a few segments per call on supported plans
+
+// How many segments to process per request. Kept small so a single call stays
+// well under the function timeout; the client re-calls until done. One segment
+// per call is the safest default (a rich segment can take ~30-60s).
+const SEGMENTS_PER_CALL = 1
 
 /**
  * POST /api/animatics/screenplay   { jobId }
  *
- * Step 3: requires every character to have a headshot. Generates the vivid
- * screenplay prose + structured shot list in one LLM pass, builds the .docx,
- * and moves the job to AWAITING_APPROVAL.
+ * Generates the screenplay INCREMENTALLY so long, multi-episode novels are
+ * adapted in full without any single request timing out. Each call processes
+ * up to SEGMENTS_PER_CALL segments, persists progress to the job, and returns
+ * { done, doneSegments, totalSegments }. The client keeps calling until done.
+ *
+ * This is the fix for "only the first episode appeared": the novel is split
+ * into ordered segments (by Episode/Chapter/Part markers, else by size) and
+ * EVERY segment is generated and stitched, instead of truncating the novel to
+ * roughly one episode.
  */
 export async function POST(req: NextRequest) {
   const auth = await requireUser()
@@ -32,34 +43,92 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  job.status = 'GENERATING'
-  await saveJob(job)
+  // Initialize progress on the first call.
+  if (!job.progress || job.status !== 'GENERATING') {
+    const segs = segmentNovel(job.novel)
+    job.progress = {
+      totalSegments: segs.length,
+      doneSegments: 0,
+      proseParts: [],
+      shots: [],
+      sceneOffset: 0,
+    }
+    job.status = 'GENERATING'
+    await saveJob(job)
+  }
+
+  const segments = segmentNovel(job.novel)
+  const p = job.progress
 
   try {
-    const { prose, shots } = await generateScreenplay(auth.email, job.novel, job.characters)
-    const title = deriveTitle(job.novel)
-    const docx = buildScreenplayDocx(`${title} — Screenplay`, prose)
+    let processed = 0
+    while (p.doneSegments < segments.length && processed < SEGMENTS_PER_CALL) {
+      const seg = segments[p.doneSegments]
+      const { prose, shots, label } = await generateSegment(
+        auth.email,
+        job.characters,
+        seg,
+        segments.length,
+        p.sceneOffset,
+        p.shots.length,
+      )
 
-    job.screenplayProse = prose
-    job.shotList = shots
-    job.docxBase64 = docx.toString('base64')
-    job.status = 'AWAITING_APPROVAL'
-    await saveJob(job)
+      if (prose) {
+        if (segments.length > 1) p.proseParts.push(`\n\n=== ${label} ===\n`)
+        p.proseParts.push(prose)
+      } else {
+        p.proseParts.push(`\n\n[Part "${seg.label}" produced no content and was skipped.]\n`)
+      }
+      p.shots.push(...shots)
+      p.sceneOffset = shots.reduce((m, s) => Math.max(m, s.scene), p.sceneOffset)
+      p.doneSegments += 1
+      processed += 1
+      await saveJob(job) // persist after every segment - resumable on timeout
+    }
+
+    const done = p.doneSegments >= segments.length
+
+    if (done) {
+      const prose = p.proseParts.join('\n').trim()
+      const title = deriveTitle(job.novel)
+      const docx = buildScreenplayDocx(`${title} - Screenplay`, prose)
+      job.screenplayProse = prose
+      job.shotList = p.shots
+      job.docxBase64 = docx.toString('base64')
+      job.status = 'AWAITING_APPROVAL'
+      job.progress = null
+      await saveJob(job)
+
+      return NextResponse.json({
+        ok: true,
+        done: true,
+        status: job.status,
+        shotCount: p.shots.length,
+        segments: segments.length,
+        documentUrl: `/api/animatics/document?jobId=${job.id}`,
+      })
+    }
 
     return NextResponse.json({
       ok: true,
-      status: job.status,
-      shotCount: shots.length,
-      documentUrl: `/api/animatics/document?jobId=${job.id}`,
+      done: false,
+      status: 'GENERATING',
+      doneSegments: p.doneSegments,
+      totalSegments: segments.length,
     })
   } catch (e) {
-    job.status = 'ERROR'
-    job.error = (e as Error).message
-    await saveJob(job)
     if (e instanceof NoLlmKeyError) {
+      job.status = 'ERROR'
+      job.error = e.message
+      await saveJob(job)
       return NextResponse.json({ error: e.message, needsKey: true }, { status: 400 })
     }
-    return NextResponse.json({ error: (e as Error).message }, { status: 500 })
+    job.error = (e as Error).message
+    await saveJob(job)
+    return NextResponse.json(
+      { error: (e as Error).message, retryable: true, doneSegments: p.doneSegments },
+      { status: 500 },
+    )
   }
 }
 

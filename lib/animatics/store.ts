@@ -90,6 +90,18 @@ export interface Job {
   shotList: Shot[] | null
   /** base64 .docx, regenerated whenever prose changes. */
   docxBase64: string | null
+  /**
+   * Screenplay generation progress. Long/multi-episode novels are generated
+   * segment-by-segment across multiple short requests so no single call times
+   * out. null until generation starts.
+   */
+  progress: {
+    totalSegments: number
+    doneSegments: number
+    proseParts: string[]
+    shots: Shot[]
+    sceneOffset: number
+  } | null
   error: string | null
 }
 
@@ -125,6 +137,7 @@ export async function createJob(
     screenplayProse: null,
     shotList: null,
     docxBase64: null,
+    progress: null,
     error: null,
   }
   await redisCmd(['SET', jobKey(job.id), JSON.stringify(job), 'EX', TTL_SECONDS])

@@ -39,6 +39,9 @@ export async function GET(req: NextRequest) {
       hasScreenplay: !!job.screenplayProse,
       screenplayProse: job.screenplayProse,
       shotCount: job.shotList?.length ?? 0,
+      generation: job.progress
+        ? { done: job.progress.doneSegments, total: job.progress.totalSegments }
+        : null,
       parseStats: job.parseStats,
       documentUrl: job.docxBase64 ? `/api/animatics/document?jobId=${job.id}` : null,
       error: job.error,

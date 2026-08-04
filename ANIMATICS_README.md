@@ -58,9 +58,20 @@ Reuses the app's existing config — no new variables required:
 
 ## Notes / limits
 
-- Long novels are clamped (head + tail) to stay within a single request's
-  context window.
-- The job blob holds base64 headshots + `.docx`; if you later expect very large
-  casts or images, move those to object storage and keep only references here.
+- **Long / multi-episode novels are adapted in full.** The novel is split into
+  ordered segments — by `Episode`/`Chapter`/`Part`/`Act` markers when present
+  (Arabic or Roman numerals, any case), otherwise by size. Each segment is
+  generated separately and stitched, so a 10-episode novel yields a full
+  10-episode screenplay rather than just the first episode.
+- Generation runs **incrementally**: the screenplay route processes one segment
+  per request, persisting progress to the job after each. The client re-calls
+  until `done:true`, showing "part N/total". This keeps every request under the
+  function timeout and makes generation **resumable** — a dropped request just
+  continues from the last saved segment. Scene/shot numbers are offset per
+  segment so they run continuously across the whole screenplay.
+- Character extraction reads a head+tail sample of the novel (cheap) to find the
+  cast; screenplay generation reads the whole novel via segmentation.
+- The job blob holds base64 `.docx`; headshots are stored under separate Redis
+  keys (kept out of the job blob so multi-character uploads stay small).
 - Phase 2 (video/audio generation) consumes `job.shotList` — the structured
   contract this phase produces.

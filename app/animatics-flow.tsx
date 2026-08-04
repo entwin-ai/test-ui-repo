@@ -100,6 +100,7 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null)
   const [needsKey, setNeedsKey] = useState(false)
   const [editedProse, setEditedProse] = useState<string>('')
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const headshotRefs = useRef<Record<string, HTMLInputElement | null>>({})
 
@@ -206,27 +207,42 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
 
   const allHeadshots = !!job && job.characters.length > 0 && job.characters.every((c) => c.hasHeadshot)
 
-  // Step 3 — generate the screenplay.
+  // Step 3 — generate the screenplay. For long/multi-episode novels this runs
+  // segment-by-segment: we call the endpoint repeatedly until done:true, so the
+  // WHOLE novel is adapted and no single request times out.
   async function generate() {
     if (!job) return
     setError(null)
     setNeedsKey(false)
     setBusy(true)
+    setProgress(null)
     try {
-      const r = await fetch('/api/animatics/screenplay', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId: job.id }),
-      })
-      const { ok, data: d, error: err } = await readResponse(r)
-      if (!ok) {
-        setError(err || 'Screenplay generation failed.')
-        if (d.needsKey) setNeedsKey(true)
-        return
+      // Safety cap on iterations (segments) to avoid an infinite loop.
+      for (let i = 0; i < 200; i++) {
+        const r = await fetch('/api/animatics/screenplay', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jobId: job.id }),
+        })
+        const { ok, data: d, error: err } = await readResponse(r)
+        if (!ok) {
+          setError(err || 'Screenplay generation failed.')
+          if (d.needsKey) setNeedsKey(true)
+          return
+        }
+        if (d.done) {
+          setProgress(null)
+          const updated = await refreshStatus(job.id)
+          setStep('screenplay')
+          if (updated?.screenplayProse) setEditedProse(updated.screenplayProse)
+          return
+        }
+        // Not done — show progress and continue with the next segment.
+        const doneN = Number(d.doneSegments) || 0
+        const totalN = Number(d.totalSegments) || 0
+        setProgress({ done: doneN, total: totalN })
       }
-      const updated = await refreshStatus(job.id)
-      setStep('screenplay')
-      if (updated?.screenplayProse) setEditedProse(updated.screenplayProse)
+      setError('Generation is taking unusually long. Please try again to resume.')
     } catch (err) {
       setError((err as Error).message)
     } finally {
@@ -379,7 +395,11 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
                 ))}
               </div>
               <button className="animatics-primary" disabled={!allHeadshots || busy} onClick={generate}>
-                {busy ? 'Generating screenplay…' : 'Generate screenplay'}
+                {busy
+                  ? progress && progress.total > 1
+                    ? `Generating… part ${progress.done}/${progress.total}`
+                    : 'Generating screenplay…'
+                  : 'Generate screenplay'}
               </button>
               {!allHeadshots && (
                 <div className="animatics-hint">Upload every headshot to continue.</div>
