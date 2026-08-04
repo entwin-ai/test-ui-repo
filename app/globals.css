@@ -1425,3 +1425,176 @@
   padding: 0;
 }
 .wa-link:hover { text-decoration: underline; }
+
+/* ---------------- Animatics Phase 1 flow ---------------- */
+.animatics-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 20, 18, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+.animatics-modal {
+  background: var(--bg-main);
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  width: 100%;
+  max-width: 720px;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+}
+.animatics-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.animatics-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+.animatics-close {
+  background: none;
+  border: none;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--text-secondary);
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.animatics-close:hover { background: var(--bg-hover); }
+.animatics-steps {
+  display: flex;
+  gap: 8px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.animatics-step-dot {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text-muted);
+  flex: 1;
+}
+.animatics-step-dot span {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bg-hover);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.animatics-step-dot.active { color: #0F6E56; font-weight: 600; }
+.animatics-step-dot.active span { background: #0F6E56; color: #fff; }
+.animatics-step-dot.done span { background: #1FB184; color: #fff; }
+.animatics-body { padding: 20px; overflow-y: auto; }
+.animatics-lead { font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 14px; }
+.animatics-lead code {
+  background: var(--bg-card);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.animatics-error {
+  background: #FCEBEB;
+  border: 1px solid #F09595;
+  color: #791F1F;
+  font-size: 12.5px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  margin-bottom: 14px;
+  line-height: 1.45;
+}
+.animatics-primary {
+  background: #0F6E56;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 6px;
+}
+.animatics-primary:hover:not(:disabled) { background: #0b5644; }
+.animatics-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.animatics-secondary {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+.animatics-secondary:hover:not(:disabled) { background: var(--bg-hover); }
+.animatics-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
+.animatics-char-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.animatics-char {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.animatics-char.ready { border-color: #1FB184; background: rgba(31, 177, 132, 0.06); }
+.animatics-char-name { font-size: 13px; font-weight: 600; }
+.animatics-role {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: #0F6E56;
+  background: #E1F5EE;
+  padding: 1px 7px;
+  border-radius: 10px;
+  margin-left: 4px;
+}
+.animatics-char-desc { font-size: 11.5px; color: var(--text-muted); line-height: 1.4; flex: 1; }
+.animatics-hint { font-size: 11.5px; color: var(--text-muted); margin-top: 8px; }
+.animatics-actions-row { display: flex; gap: 10px; margin-bottom: 12px; }
+.animatics-editor {
+  width: 100%;
+  min-height: 300px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  resize: vertical;
+  margin-bottom: 12px;
+  color: var(--text-primary);
+  background: var(--bg-main);
+}
+.animatics-done { text-align: center; padding: 20px 0; }
+.animatics-check {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: #1FB184;
+  color: #fff;
+  font-size: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 16px;
+}

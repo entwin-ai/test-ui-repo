@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSession, signIn, signOut } from 'next-auth/react'
 import { LOGO_DATA_URI } from './logo'
+import AnimaticsFlow from './animatics-flow'
 
 type ViewKey = 'chat' | 'connectors' | 'dashboard' | 'memory' | 'settings'
 type DashTab = 'overview' | 'kanban' | 'entities'
@@ -596,12 +597,16 @@ function ConnectorsView({
   const isWhatsApp = (c: Connector) => c.service === 'whatsapp'
   const isSlack = (c: Connector) => c.service === 'slack' && !!c.slackCardId
 
+  // Animatics Phase 1 flow modal (novel → cast → screenplay → approve).
+  const [animaticsOpen, setAnimaticsOpen] = useState(false)
+
   const toggle = (idx: number) => {
     const c = connectors[idx]
 
-    // Animatics: static button, always reads "Connect" and performs no
-    // state change on click (no OAuth, no connected toggle).
+    // Animatics: the Connect button opens the Phase 1 flow modal. It never
+    // toggles a connected state (the label always reads "Connect").
     if (c.icon === 'animatics') {
+      setAnimaticsOpen(true)
       return
     }
 
@@ -792,6 +797,7 @@ function ConnectorsView({
         )
       })}
     </div>
+    {animaticsOpen && <AnimaticsFlow onClose={() => setAnimaticsOpen(false)} />}
     </>
   )
 }
