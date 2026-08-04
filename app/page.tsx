@@ -153,7 +153,7 @@ const INITIAL_CONNECTORS: Connector[] = [
   { name: 'Google Drive — Professional', service: 'drive', icon: 'drive', desc: 'Document ingestion for the vault.', connected: false, connectedEmail: null },
   { name: 'Google Calendar', service: null, icon: 'calendar', desc: 'Meeting and scheduling context.', connected: false, connectedEmail: null },
   { name: 'WhatsApp', service: 'whatsapp', code: 'WA', desc: 'Personal messages, vectorized into cross-channel memory.', connected: false, connectedEmail: null, wa: null },
-  { name: 'Animatics', service: null, icon: 'animatics', desc: 'Personal messages, facet-decomposed.', connected: false, connectedEmail: null },
+  { name: 'Animatics', service: null, icon: 'animatics', desc: 'Create Anime from your Novel', connected: false, connectedEmail: null },
   { name: 'Slack', service: 'slack', icon: 'slack', slackCardId: 'slack-workspace', desc: 'Work channel ingestion — pulls the last 1 month of Slack chats.', connected: false, connectedEmail: null, slackScan: null },
   { name: 'Browser history', service: null, code: 'BH', desc: 'Search activity as raw source.', connected: false, connectedEmail: null },
 ]
@@ -599,6 +599,12 @@ function ConnectorsView({
   const toggle = (idx: number) => {
     const c = connectors[idx]
 
+    // Animatics: static button, always reads "Connect" and performs no
+    // state change on click (no OAuth, no connected toggle).
+    if (c.icon === 'animatics') {
+      return
+    }
+
     // WhatsApp: open the phone-number popup (connect) or disconnect the link.
     if (isWhatsApp(c)) {
       if (c.connected) {
@@ -680,6 +686,7 @@ function ConnectorsView({
         const gmail = isGmail(c)
         const whatsapp = isWhatsApp(c)
         const slack = isSlack(c)
+        const animatics = c.icon === 'animatics'
         let statusText: string
         if (whatsapp && c.wa) {
           if (c.wa.state === 'pairing') statusText = 'Pairing — enter code on phone'
@@ -694,7 +701,9 @@ function ConnectorsView({
         }
 
         // Buttons: Gmail scanning shows a disabled "Reading…" state.
-        const btnLabel = c.scanning
+        const btnLabel = animatics
+          ? 'Connect'
+          : c.scanning
           ? 'Reading…'
           : whatsapp && c.wa?.state === 'pairing'
           ? 'Pairing…'
@@ -766,9 +775,13 @@ function ConnectorsView({
             )}
 
             <div className="connector-bottom">
-              <span className={`connector-status ${c.connected ? 'connected' : 'off'}`}>{statusText}</span>
+              {animatics ? (
+                <span className="connector-status off" style={{ visibility: 'hidden' }}></span>
+              ) : (
+                <span className={`connector-status ${c.connected ? 'connected' : 'off'}`}>{statusText}</span>
+              )}
               <button
-                className={`connect-toggle ${c.connected ? 'connected' : ''}`}
+                className={`connect-toggle ${!animatics && c.connected ? 'connected' : ''}`}
                 onClick={() => toggle(idx)}
                 disabled={c.scanning}
               >
