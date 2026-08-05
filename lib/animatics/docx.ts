@@ -20,7 +20,7 @@ function esc(s: string): string {
 
 interface Line {
   text: string
-  style: 'Title' | 'Heading1' | 'Heading2' | 'Normal' | 'Dialogue'
+  style: 'Title' | 'EpisodeHeading' | 'Heading1' | 'Heading2' | 'Normal' | 'Dialogue'
 }
 
 /**
@@ -32,7 +32,10 @@ function proseToLines(title: string, prose: string): Line[] {
   for (const rawPara of prose.split(/\n/)) {
     const p = rawPara.trim()
     if (!p) continue
-    if (/^scene\b/i.test(p) || /^(int\.|ext\.)/i.test(p)) {
+    if (p.startsWith('## ')) {
+      // Preserved source episode/chapter heading (e.g. "E1: Past Is Prologue").
+      lines.push({ text: p.replace(/^##\s+/, ''), style: 'EpisodeHeading' })
+    } else if (/^scene\b/i.test(p) || /^(int\.|ext\.)/i.test(p)) {
       lines.push({ text: p, style: 'Heading1' })
     } else if (/^[A-Z][A-Z0-9 .'\-]{1,30}:/.test(p)) {
       lines.push({ text: p, style: 'Dialogue' })
@@ -62,6 +65,7 @@ function documentXml(lines: Line[]): string {
 const STYLES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
 <w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:pPr><w:spacing w:after="240"/><w:jc w:val="center"/></w:pPr><w:rPr><w:b/><w:sz w:val="48"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="EpisodeHeading"><w:name w:val="Episode Heading"/><w:pPr><w:pageBreakBefore/><w:spacing w:before="240" w:after="200"/><w:pBdr><w:bottom w:val="single" w:sz="12" w:space="6" w:color="0F6E56"/></w:pBdr></w:pPr><w:rPr><w:b/><w:color w:val="0F6E56"/><w:sz w:val="36"/></w:rPr></w:style>
 <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:spacing w:before="280" w:after="120"/></w:pPr><w:rPr><w:b/><w:caps/><w:sz w:val="28"/></w:rPr></w:style>
 <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:pPr><w:spacing w:before="200" w:after="100"/></w:pPr><w:rPr><w:b/><w:sz w:val="26"/></w:rPr></w:style>
 <w:style w:type="paragraph" w:styleId="Dialogue"><w:name w:val="Dialogue"/><w:pPr><w:ind w:left="720"/><w:spacing w:after="80"/></w:pPr><w:rPr><w:i/></w:rPr></w:style>

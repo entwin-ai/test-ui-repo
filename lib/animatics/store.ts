@@ -195,3 +195,23 @@ export async function getHeadshot(
 ): Promise<string | null> {
   return (await redisCmd(['GET', headshotKey(jobId, characterId)])) as string | null
 }
+
+/**
+ * Delete a job and everything associated with it — the job blob, every
+ * character's headshot key, and the owner→latest-job index. Used by Disconnect
+ * so the user can start a completely fresh run from scratch. Ownership is
+ * checked by the caller (route) via getOwnedJob before calling this.
+ */
+export async function deleteJob(job: Job): Promise<void> {
+  // Remove each stored headshot.
+  for (const c of job.characters) {
+    await redisCmd(['DEL', headshotKey(job.id, c.id)])
+  }
+  // Remove the job blob.
+  await redisCmd(['DEL', jobKey(job.id)])
+  // Clear the owner index if it still points at this job.
+  const latest = (await redisCmd(['GET', ownerIndexKey(job.owner)])) as string | null
+  if (latest === job.id) {
+    await redisCmd(['DEL', ownerIndexKey(job.owner)])
+  }
+}

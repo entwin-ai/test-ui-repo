@@ -94,7 +94,13 @@ async function downscaleImage(file: File, maxEdge = 640, quality = 0.85): Promis
   })
 }
 
-export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
+export default function AnimaticsFlow({
+  onClose,
+  onConnectedChange,
+}: {
+  onClose: () => void
+  onConnectedChange?: (connected: boolean) => void
+}) {
   const [job, setJob] = useState<JobState | null>(null)
   const [step, setStep] = useState<Step>('upload')
   const [busy, setBusy] = useState(false)
@@ -113,6 +119,7 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
         const r = await fetch('/api/animatics/status')
         const d = await r.json()
         if (d.job) {
+          onConnectedChange?.(true)
           setJob(d.job)
           setStep(statusToStep(d.job))
           if (d.job.screenplayProse) setEditedProse(d.job.screenplayProse)
@@ -167,6 +174,8 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
         return
       }
       const jobId = d.jobId as string
+      // A run now exists — flip the connector button to "Disconnect".
+      onConnectedChange?.(true)
       // Upload succeeded instantly. Now extract the cast as a separate step so
       // the slow LLM call can't time out the upload.
       setStep('characters')
@@ -307,6 +316,32 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
     }
   }
 
+  /**
+   * Start over — forget the current run entirely and return to step 1. Works
+   * from ANY stage. Wipes the job server-side, then resets all local state.
+   */
+  async function startOver() {
+    setBusy(true)
+    setError(null)
+    try {
+      await fetch('/api/animatics/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(job ? { jobId: job.id } : {}),
+      }).catch(() => {})
+    } finally {
+      // Reset all local flow state to a clean slate.
+      setJob(null)
+      setStep('upload')
+      setEditedProse('')
+      setProgress(null)
+      setExtracting(false)
+      setNeedsKey(false)
+      setBusy(false)
+      onConnectedChange?.(false)
+    }
+  }
+
   // Step 3b — save edits (rebuilds the .docx).
   async function saveEdits() {
     if (!job) return
@@ -362,10 +397,29 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
       <div className="animatics-modal" onClick={(e) => e.stopPropagation()}>
         <div className="animatics-header">
           <div className="animatics-title">Animatics — Create Anime from your Novel</div>
-          <button className="animatics-close" aria-label="Close" onClick={onClose}>
-            ×
-          </button>
+          <div className="animatics-header-actions">
+            {(job || step !== 'upload') && (
+              <button
+                className="animatics-startover"
+                onClick={startOver}
+                disabled={busy}
+                title="Forget this run and start from the beginning"
+              >
+                ↻ Start over
+              </button>
+            )}
+            <button className="animatics-close" aria-label="Close" onClick={onClose}>
+              ×
+            </button>
+          </div>
         </div>
+
+        {step === 'approved' && (
+          <div className="animatics-rerun-hint">
+            Want to make another? Use <strong>Start over</strong> above, or click
+            <strong> Disconnect</strong> on the card, to begin a fresh run.
+          </div>
+        )}
 
         <div className="animatics-steps">
           {(['upload', 'characters', 'screenplay', 'approved'] as Step[]).map((s, i) => (

@@ -1611,3 +1611,25 @@
   animation: animatics-spin 0.8s linear infinite;
 }
 @keyframes animatics-spin { to { transform: rotate(360deg); } }
+
+/* Animatics — start over / re-run controls */
+.animatics-header-actions { display: flex; align-items: center; gap: 8px; }
+.animatics-startover {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.animatics-startover:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.animatics-startover:disabled { opacity: 0.5; cursor: not-allowed; }
+.animatics-rerun-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: #E1F5EE;
+  border-bottom: 1px solid var(--border);
+  padding: 8px 20px;
+}

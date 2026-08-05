@@ -69,12 +69,25 @@ function sampleForCast(novel: string, maxChars = 24000): string {
  *     into ~targetChars-sized segments on blank-line boundaries.
  *  3. If a single segment is still larger than maxSegmentChars, hard-split it.
  */
+// Recognizes full-word markers (Episode 3, Chapter VII, Part Two) AND common
+// abbreviated forms used in web-serial / screenplay-style novels:
+//   "E1: Past Is Prologue", "EP 2 —", "Ch. 4", "#5", "S3:"
+// The abbreviated branch accepts an optional trailing separator/title so both
+// "E1: Title" and a bare "Ep 3" are caught, but it requires the token to be a
+// short prefix (E/EP/CH/S) so ordinary words aren't misread as boundaries.
 const BOUNDARY_RE =
-  /^\s*(episode|chapter|chapitre|part|act|book|scene)\b[\s.:—-]*([0-9]+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b/i
+  /^\s*(?:(episode|chapter|chapitre|part|act|book|scene)\b[\s.:—-]*(?:[0-9]+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b|(?:ep|e|ch|s)[\s.]*[0-9]{1,3}\b\s*[:.\-—)]?|#\s*[0-9]{1,3}\b)/i
 
 export interface NovelSegment {
   index: number
   label: string
+  /**
+   * True when `label` is an actual heading taken from the source text (an
+   * Episode/Chapter marker). False for synthetic labels the splitter invents
+   * ("Part 2", "... (cont. 1)"). Only real headings are echoed into the
+   * screenplay output.
+   */
+  sourceHeading: boolean
   text: string
 }
 
@@ -91,18 +104,39 @@ export function segmentNovel(
     if (BOUNDARY_RE.test(ln.trim())) boundaryIdx.push(i)
   })
 
-  let rawSegments: { label: string; text: string }[] = []
+  let rawSegments: { label: string; text: string; sourceHeading: boolean }[] = []
 
   if (boundaryIdx.length >= 2) {
+    // Many novels repeat their markers in a table of contents at the top (each
+    // TOC line is a boundary but has no prose after it). Drop boundaries whose
+    // content is too short to be a real chapter — that filters out the TOC and
+    // keeps only the actual body starts. A real episode is well over 400 chars.
+    const MIN_SEGMENT_CHARS = 400
+    const filtered: number[] = []
+    for (let k = 0; k < boundaryIdx.length; k++) {
+      const from = boundaryIdx[k]
+      const to = k + 1 < boundaryIdx.length ? boundaryIdx[k + 1] : lines.length
+      const between = lines.slice(from + 1, to).join('\n').trim()
+      if (between.length >= MIN_SEGMENT_CHARS) filtered.push(from)
+    }
+    const effective = filtered.length >= 2 ? filtered : boundaryIdx
+
     // Include any preamble before the first boundary with the first segment.
-    const starts = boundaryIdx[0] === 0 ? boundaryIdx : [0, ...boundaryIdx]
+    const starts = effective[0] === 0 ? effective : [0, ...effective]
     for (let s = 0; s < starts.length; s++) {
       const from = starts[s]
       const to = s + 1 < starts.length ? starts[s + 1] : lines.length
       const chunk = lines.slice(from, to).join('\n').trim()
       if (!chunk) continue
-      const label = (lines[from] || '').trim().slice(0, 60) || `Segment ${s + 1}`
-      rawSegments.push({ label, text: chunk })
+      // Skip a leading preamble chunk that is itself just front-matter/TOC.
+      if (s === 0 && from === 0 && chunk.length < MIN_SEGMENT_CHARS) continue
+      // A segment that starts ON a boundary line carries a real source heading;
+      // a prepended preamble chunk (from === 0, not itself a boundary) does not.
+      const startedOnBoundary = BOUNDARY_RE.test((lines[from] || '').trim())
+      const label = startedOnBoundary
+        ? (lines[from] || '').trim().slice(0, 80)
+        : `Segment ${s + 1}`
+      rawSegments.push({ label, text: chunk, sourceHeading: startedOnBoundary })
     }
   } else {
     // Pass 2 — no usable markers: pack paragraphs to ~targetChars.
@@ -111,16 +145,16 @@ export function segmentNovel(
     let n = 1
     for (const p of paras) {
       if (buf && buf.length + p.length > targetChars) {
-        rawSegments.push({ label: `Part ${n++}`, text: buf.trim() })
+        rawSegments.push({ label: `Part ${n++}`, text: buf.trim(), sourceHeading: false })
         buf = ''
       }
       buf += (buf ? '\n\n' : '') + p
     }
-    if (buf.trim()) rawSegments.push({ label: `Part ${n}`, text: buf.trim() })
+    if (buf.trim()) rawSegments.push({ label: `Part ${n}`, text: buf.trim(), sourceHeading: false })
   }
 
   // Pass 3 — hard-split any oversized segment so no single call is too large.
-  const bounded: { label: string; text: string }[] = []
+  const bounded: { label: string; text: string; sourceHeading: boolean }[] = []
   for (const seg of rawSegments) {
     if (seg.text.length <= maxSegmentChars) {
       bounded.push(seg)
@@ -132,13 +166,30 @@ export function segmentNovel(
       // Split on the last paragraph break before the cap to avoid cutting mid-scene.
       let cut = rest.lastIndexOf('\n\n', maxSegmentChars)
       if (cut < maxSegmentChars * 0.5) cut = maxSegmentChars // no good break — hard cut
-      bounded.push({ label: `${seg.label} (cont. ${part++})`, text: rest.slice(0, cut).trim() })
+      // Only the FIRST piece of a split episode keeps the source heading, so
+      // the episode title is printed once, not on every continuation.
+      bounded.push({
+        label: part === 1 ? seg.label : `${seg.label} (cont. ${part})`,
+        text: rest.slice(0, cut).trim(),
+        sourceHeading: part === 1 ? seg.sourceHeading : false,
+      })
+      part++
       rest = rest.slice(cut)
     }
-    if (rest.trim()) bounded.push({ label: `${seg.label} (cont. ${part})`, text: rest.trim() })
+    if (rest.trim())
+      bounded.push({
+        label: `${seg.label} (cont. ${part})`,
+        text: rest.trim(),
+        sourceHeading: false,
+      })
   }
 
-  return bounded.map((s, i) => ({ index: i, label: s.label, text: s.text }))
+  return bounded.map((s, i) => ({
+    index: i,
+    label: s.label,
+    sourceHeading: s.sourceHeading,
+    text: s.text,
+  }))
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +271,8 @@ You MUST return ONLY strict JSON with two top-level keys — no prose outside th
 Rules:
 - Use ONLY the provided cast names for named characters. Extra background figures are allowed in descriptions but never in the "characters" name field.
 - Keep prose and shots consistent: every shot must correspond to a moment in the prose.
-- Aim for 8–40 shots depending on story length.
+- FIDELITY: adapt the source faithfully and completely. Preserve every plot beat, reveal, and scene in the given part. Preserve the dialogue — keep the characters' spoken lines (you may lightly tighten them, but do not cut exchanges or invent plot). Do not summarize multiple events into one line; give each its own shot.
+- Generate as many shots as the material needs to cover the whole part — do not compress to hit a small number. A typical episode yields many shots.
 - Every character entry needs a concrete clothingColor, pose, and expression.`
 
 export interface ScreenplayResult {
@@ -275,7 +327,7 @@ export async function generateSegment(
   totalSegments: number,
   sceneOffset: number,
   shotOffset: number,
-): Promise<{ prose: string; shots: Shot[]; label: string }> {
+): Promise<{ prose: string; shots: Shot[]; label: string; sourceHeading: boolean }> {
   const provider = await boundProvider(email)
   const context =
     totalSegments > 1
@@ -291,7 +343,7 @@ export async function generateSegment(
   const parsed = parseLenientJson<{ prose?: string; shots?: unknown }>(raw)
   const prose = String(parsed.prose || '').trim()
   const shots = normalizeShots(parsed.shots, sceneOffset, shotOffset)
-  return { prose, shots, label: segment.label }
+  return { prose, shots, label: segment.label, sourceHeading: segment.sourceHeading }
 }
 
 /**
@@ -311,7 +363,7 @@ export async function generateScreenplay(
 
   for (const seg of segments) {
     try {
-      const { prose, shots, label } = await generateSegment(
+      const { prose, shots, label, sourceHeading } = await generateSegment(
         email,
         characters,
         seg,
@@ -320,7 +372,7 @@ export async function generateScreenplay(
         allShots.length,
       )
       if (prose) {
-        if (segments.length > 1) proseParts.push(`\n\n=== ${label} ===\n`)
+        if (sourceHeading) proseParts.push(`\n\n## ${label}\n`)
         proseParts.push(prose)
       }
       allShots.push(...shots)

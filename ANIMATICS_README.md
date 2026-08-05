@@ -35,6 +35,16 @@ through:
   zero-dependency `.docx` builder (a docx is a ZIP of OOXML; a tiny ZIP writer
   packs it). No new npm packages, so no added cold-start cost.
 
+### Re-running (Connect / Disconnect)
+
+The connector button toggles: **Connect** starts (or resumes) a run and turns
+into **Disconnect** once a run exists. Clicking **Disconnect** calls
+`/api/animatics/reset`, which deletes the job entirely — the job blob, every
+stored headshot, and the owner index — so the next Connect begins a completely
+fresh run from step 1. Inside the modal there's also a **↻ Start over** button
+that does the same thing from ANY stage without closing the modal. Reset is
+idempotent and owner-scoped.
+
 ## API routes (all under `/api/animatics/`)
 
 | Route | Method | Purpose |
@@ -83,10 +93,16 @@ Reuses the app's existing config — no new variables required:
 ## Notes / limits
 
 - **Long / multi-episode novels are adapted in full.** The novel is split into
-  ordered segments — by `Episode`/`Chapter`/`Part`/`Act` markers when present
-  (Arabic or Roman numerals, any case), otherwise by size. Each segment is
-  generated separately and stitched, so a 10-episode novel yields a full
-  10-episode screenplay rather than just the first episode.
+  ordered segments — by boundary markers when present, otherwise by size. Both
+  full-word markers (`Episode 3`, `Chapter VII`, `Part Two`, Roman or Arabic,
+  any case) and abbreviated forms (`E1:`, `EP 2`, `Ch. 4`, `S3:`, `#5`) are
+  recognized. A repeated table-of-contents block at the top is detected and
+  skipped so it doesn't create phantom segments. Each segment is generated
+  separately and stitched, so a 10-episode novel yields a full 10-episode
+  screenplay rather than just the first episode. **When the source labels its
+  episodes/chapters, those exact headings are preserved in the screenplay** —
+  each becomes a styled heading (teal, page break before) above that episode's
+  scenes. Novels split only by size get no injected headings.
 - Generation runs **incrementally**: the screenplay route processes one segment
   per request, persisting progress to the job after each. The client re-calls
   until `done:true`, showing "part N/total". This keeps every request under the

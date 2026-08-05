@@ -599,14 +599,47 @@ function ConnectorsView({
 
   // Animatics Phase 1 flow modal (novel → cast → screenplay → approve).
   const [animaticsOpen, setAnimaticsOpen] = useState(false)
+  // Whether an Animatics run currently exists (drives Connect/Disconnect label).
+  const [animaticsConnected, setAnimaticsConnected] = useState(false)
+
+  // On mount, reflect any in-progress Animatics run so the button shows the
+  // right label after a page reload.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const r = await fetch('/api/animatics/status')
+        const d = await r.json()
+        if (!cancelled) setAnimaticsConnected(!!d.job)
+      } catch {
+        /* ignore */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const toggle = (idx: number) => {
     const c = connectors[idx]
 
-    // Animatics: the Connect button opens the Phase 1 flow modal. It never
-    // toggles a connected state (the label always reads "Connect").
+    // Animatics: Connect opens the Phase 1 flow (starting/continuing a run);
+    // Disconnect forgets the last run so the user can start fresh from step 1.
     if (c.icon === 'animatics') {
-      setAnimaticsOpen(true)
+      if (animaticsConnected) {
+        // Disconnect — wipe the run, then reset UI state.
+        fetch('/api/animatics/reset', { method: 'POST' })
+          .catch(() => {})
+          .finally(() => {
+            setAnimaticsConnected(false)
+          })
+        setConnectors((prev) =>
+          prev.map((x, i) => (i === idx ? { ...x, connected: false } : x)),
+        )
+      } else {
+        // Connect — open the flow to begin a new run.
+        setAnimaticsOpen(true)
+      }
       return
     }
 
@@ -707,7 +740,9 @@ function ConnectorsView({
 
         // Buttons: Gmail scanning shows a disabled "Reading…" state.
         const btnLabel = animatics
-          ? 'Connect'
+          ? animaticsConnected
+            ? 'Disconnect'
+            : 'Connect'
           : c.scanning
           ? 'Reading…'
           : whatsapp && c.wa?.state === 'pairing'
@@ -786,7 +821,7 @@ function ConnectorsView({
                 <span className={`connector-status ${c.connected ? 'connected' : 'off'}`}>{statusText}</span>
               )}
               <button
-                className={`connect-toggle ${!animatics && c.connected ? 'connected' : ''}`}
+                className={`connect-toggle ${(animatics ? animaticsConnected : c.connected) ? 'connected' : ''}`}
                 onClick={() => toggle(idx)}
                 disabled={c.scanning}
               >
@@ -797,7 +832,12 @@ function ConnectorsView({
         )
       })}
     </div>
-    {animaticsOpen && <AnimaticsFlow onClose={() => setAnimaticsOpen(false)} />}
+    {animaticsOpen && (
+      <AnimaticsFlow
+        onClose={() => setAnimaticsOpen(false)}
+        onConnectedChange={setAnimaticsConnected}
+      />
+    )}
     </>
   )
 }

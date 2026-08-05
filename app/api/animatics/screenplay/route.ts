@@ -64,7 +64,7 @@ export async function POST(req: NextRequest) {
     let processed = 0
     while (p.doneSegments < segments.length && processed < SEGMENTS_PER_CALL) {
       const seg = segments[p.doneSegments]
-      const { prose, shots, label } = await generateSegment(
+      const { prose, shots, label, sourceHeading } = await generateSegment(
         auth.email,
         job.characters,
         seg,
@@ -74,10 +74,13 @@ export async function POST(req: NextRequest) {
       )
 
       if (prose) {
-        if (segments.length > 1) p.proseParts.push(`\n\n=== ${label} ===\n`)
+        // If the source labelled this segment (e.g. "E1: Past Is Prologue"),
+        // preserve that exact heading in the screenplay. Synthetic size-split
+        // labels ("Part 2") are not injected.
+        if (sourceHeading) p.proseParts.push(`\n\n## ${label}\n`)
         p.proseParts.push(prose)
       } else {
-        p.proseParts.push(`\n\n[Part "${seg.label}" produced no content and was skipped.]\n`)
+        p.proseParts.push(`\n\n[Section "${seg.label}" produced no content and was skipped.]\n`)
       }
       p.shots.push(...shots)
       p.sceneOffset = shots.reduce((m, s) => Math.max(m, s.scene), p.sceneOffset)
