@@ -15,6 +15,7 @@ import { getSlackSession } from './lib/redis-slack.js';
 import { captureSlack, ingestSlackBackfill, ingestSlackDelta } from './pipeline/slack.js';
 import { backfillEntities } from './entity-backfill.js';
 import { runPool } from './lib/pool.js';
+import { deltaDue, markDeltaRan } from './lib/schedule.js';
 
 // backfill | delta                    -> Gmail
 // whatsapp-sync                       -> WhatsApp: capture (drain offline) + vectorize, one bounded run
@@ -117,7 +118,11 @@ async function runDelta(acct, accessToken, provider) {
   });
   await admin
     .from('sync_state')
-    .update({ last_history_id: latestHistoryId, updated_at: new Date().toISOString() })
+    .update({
+      last_history_id: latestHistoryId,
+      last_delta_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
     .eq('id', acct.id);
 }
 
@@ -244,6 +249,23 @@ async function main() {
   console.log(`MODE=${MODE} gmail-accounts=${list.length}`);
   for (const acct of list) {
     try {
+      // Per-user scheduling: in delta mode, only run this account if the user's
+      // chosen "Reading frequency" (pollHours, from connector_state.settings)
+      // has elapsed since its last successful delta. Backfill is never gated.
+      // This is what makes user X (every 3h) and user Y (every 10h) each run at
+      // their own cadence off one shared heartbeat cron.
+      if (MODE === 'delta') {
+        const { due, pollHours, nextDueAt } = await deltaDue(acct);
+        if (!due) {
+          console.log(
+            `[${acct.user_email}/${acct.card_id}] not due (every ${pollHours}h; ` +
+              `next ~${nextDueAt ? nextDueAt.toISOString() : 'n/a'}) — skipping`,
+          );
+          continue;
+        }
+        console.log(`[${acct.user_email}/${acct.card_id}] due (every ${pollHours}h) — running delta`);
+      }
+
       const llmConfig = await getLlmConfig(acct.user_email);
       if (!llmConfig) {
         console.log(`[${acct.user_email}/${acct.card_id}] no LLM key set — skipping`);

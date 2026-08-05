@@ -1,14 +1,25 @@
 name: gmail-delta
 
-# Differential sync across all connected accounts (rows in sync_state).
+# Differential sync across connected Gmail accounts (gmail rows in sync_state).
+#
+# HEARTBEAT vs PER-USER CADENCE:
+# This cron is only a HEARTBEAT. On each tick the worker inspects every gmail
+# account and runs delta for one ONLY if that user's chosen "Reading frequency"
+# (pollHours in connector_state.settings) has elapsed since the account's last
+# successful delta (sync_state.last_delta_at). So user X on 3h and user Y on 10h
+# each sync at their own cadence off this single schedule — see worker
+# lib/schedule.js and the Gmail delta loop in worker/src/index.js.
+#
+# Hourly, because the smallest selectable frequency is 1 hour; a finer tick
+# would just skip most accounts every time. Bump to '*/30 * * * *' if you later
+# allow sub-hourly frequencies, or drive workflow_dispatch from pg_cron /
+# Trigger.dev / QStash for tighter guarantees.
 #
 # CAVEAT: GitHub cron is best-effort — runs can be delayed 15-30+ min or skipped
 # under load, and the schedule auto-DISABLES after 60 days of repo inactivity.
-# For reliable 15-min freshness, drive workflow_dispatch from Supabase pg_cron
-# or Trigger.dev/QStash instead; the job body stays identical.
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '0 * * * *'
   workflow_dispatch: {}
 
 concurrency:
