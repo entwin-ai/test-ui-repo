@@ -673,6 +673,25 @@
     cursor: pointer;
   }
   .save-btn:hover { background: var(--accent-dark); }
+  /* Destructive "Kill My Twin" action, pinned to the bottom-right of Settings. */
+  .kill-twin-row {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 40px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+  }
+  .kill-twin-btn {
+    padding: 10px 20px;
+    background: #d32f2f;
+    color: #fff;
+    font-weight: 700;
+    font-size: 13.5px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .kill-twin-btn:hover { background: #b71c1c; }
   .save-confirm {
     font-size: 12.5px;
     color: var(--green);

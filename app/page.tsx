@@ -2041,6 +2041,20 @@ function SettingsView({ entwinName, setEntwinName }: { entwinName: string; setEn
             {saveErr && <span className="save-confirm show" style={{ color: '#e53935' }}>{saveErr}</span>}
           </div>
         </div>
+
+        <div className="kill-twin-row">
+          <button
+            type="button"
+            className="kill-twin-btn"
+            onClick={() => {
+              window.confirm(
+                'Kill My Twin will permanently delete your digital twin and all ingested data. This cannot be undone. Continue?',
+              )
+            }}
+          >
+            Kill My Twin
+          </button>
+        </div>
       </div>
     </>
   )
