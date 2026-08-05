@@ -1899,6 +1899,8 @@ function SettingsView({ entwinName, setEntwinName }: { entwinName: string; setEn
   const [configured, setConfigured] = useState<{ provider?: string; model?: string } | null>(null)
   const [saveErr, setSaveErr] = useState('')
   const [saving, setSaving] = useState(false)
+  const [killing, setKilling] = useState(false)
+  const [killErr, setKillErr] = useState('')
   const boxRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -1960,6 +1962,36 @@ function SettingsView({ entwinName, setEntwinName }: { entwinName: string; setEn
       setSaveErr((e as Error).message)
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function handleKillTwin() {
+    // Double confirmation for an irreversible, total deletion.
+    const ok = window.confirm(
+      'Kill My Twin will permanently delete your digital twin and all ingested data. This cannot be undone. Continue?',
+    )
+    if (!ok) return
+
+    setKillErr('')
+    setKilling(true)
+    try {
+      const res = await fetch('/api/twin', { method: 'DELETE' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        // 207 = partial failure; surface which parts failed so they can retry.
+        const detail =
+          Array.isArray(data?.errors) && data.errors.length
+            ? ` (${data.errors.join('; ')})`
+            : data?.error
+            ? ` (${data.error})`
+            : ''
+        throw new Error(`Deletion did not fully complete${detail}. Please try again.`)
+      }
+      // Twin is gone — end the session and return to the landing screen.
+      await signOut({ callbackUrl: '/' })
+    } catch (e) {
+      setKillErr((e as Error).message)
+      setKilling(false)
     }
   }
 
@@ -2043,16 +2075,14 @@ function SettingsView({ entwinName, setEntwinName }: { entwinName: string; setEn
         </div>
 
         <div className="kill-twin-row">
+          {killErr && <span className="kill-twin-err">{killErr}</span>}
           <button
             type="button"
             className="kill-twin-btn"
-            onClick={() => {
-              window.confirm(
-                'Kill My Twin will permanently delete your digital twin and all ingested data. This cannot be undone. Continue?',
-              )
-            }}
+            onClick={handleKillTwin}
+            disabled={killing}
           >
-            Kill My Twin
+            {killing ? 'Deleting…' : 'Kill My Twin'}
           </button>
         </div>
       </div>

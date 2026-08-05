@@ -677,10 +677,13 @@
   .kill-twin-row {
     display: flex;
     justify-content: flex-end;
+    align-items: center;
+    gap: 12px;
     margin-top: 40px;
     padding-top: 20px;
     border-top: 1px solid var(--border);
   }
+  .kill-twin-err { font-size: 12.5px; color: #b71c1c; text-align: right; }
   .kill-twin-btn {
     padding: 10px 20px;
     background: #d32f2f;
@@ -692,6 +695,7 @@
     cursor: pointer;
   }
   .kill-twin-btn:hover { background: #b71c1c; }
+  .kill-twin-btn:disabled { opacity: 0.65; cursor: default; }
   .save-confirm {
     font-size: 12.5px;
     color: var(--green);
