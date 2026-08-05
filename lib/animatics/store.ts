@@ -43,6 +43,11 @@ export type JobStatus =
   | 'GENERATING' //         screenplay LLM call in flight
   | 'AWAITING_APPROVAL' //  docx ready, user reviewing/editing
   | 'APPROVED' //           final screenplay approved — ready for Phase 2
+  // ---- Phase 2 (video render) ----
+  | 'RENDER_QUEUED' //      approved & queued for the Colab worker to claim
+  | 'RENDERING' //          a Colab worker has claimed it and is generating
+  | 'RENDER_DONE' //        MP4 in Drive; link available; email pending/sent
+  | 'RENDER_FAILED' //      the render worker reported a failure
   | 'ERROR'
 
 export interface Character {
@@ -103,12 +108,28 @@ export interface Job {
     shots: Shot[]
     sceneOffset: number
   } | null
+  /**
+   * Phase 2 render state. Populated when the screenplay is queued for video
+   * rendering and updated by the Colab worker via the render API.
+   */
+  render: {
+    queuedAt: number
+    claimedAt: number | null
+    workerId: string | null // opaque id of the Colab session that claimed it
+    progress: string | null // free-text status the worker reports
+    driveFileId: string | null
+    driveLink: string | null // shareable MP4 link
+    emailedAt: number | null
+    failure: string | null
+  } | null
   error: string | null
 }
 
 function jobKey(id: string): string {
   return `entwin:animatics:job:${id}`
 }
+// Sorted-set style queue of job ids awaiting render (we use a simple list).
+const RENDER_QUEUE_KEY = 'entwin:animatics:render:queue'
 function ownerIndexKey(email: string): string {
   const hash = crypto.createHash('sha256').update(email.toLowerCase()).digest('hex').slice(0, 24)
   return `entwin:animatics:owner:${hash}`
@@ -141,6 +162,7 @@ export async function createJob(
     shotList: null,
     docxBase64: null,
     progress: null,
+    render: null,
     error: null,
   }
   await redisCmd(['SET', jobKey(job.id), JSON.stringify(job), 'EX', TTL_SECONDS])
@@ -214,4 +236,56 @@ export async function deleteJob(job: Job): Promise<void> {
   if (latest === job.id) {
     await redisCmd(['DEL', ownerIndexKey(job.owner)])
   }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — render queue (Colab worker claims jobs from here)
+// ---------------------------------------------------------------------------
+
+/** Add a job id to the render queue and stamp its render state. */
+export async function enqueueRender(job: Job): Promise<void> {
+  job.render = {
+    queuedAt: Date.now(),
+    claimedAt: null,
+    workerId: null,
+    progress: null,
+    driveFileId: null,
+    driveLink: null,
+    emailedAt: null,
+    failure: null,
+  }
+  job.status = 'RENDER_QUEUED'
+  await saveJob(job)
+  // RPUSH onto the queue list.
+  await redisCmd(['RPUSH', RENDER_QUEUE_KEY, job.id])
+}
+
+/**
+ * Claim the next queued render job for a worker. Pops an id off the queue
+ * (LPOP) and marks it RENDERING. Returns the job, or null if the queue is
+ * empty. If a popped job is no longer valid (deleted, wrong state) it is
+ * skipped. Bounded loop so a queue full of stale ids can't spin forever.
+ */
+export async function claimNextRender(workerId: string): Promise<Job | null> {
+  for (let i = 0; i < 20; i++) {
+    const id = (await redisCmd(['LPOP', RENDER_QUEUE_KEY])) as string | null
+    if (!id) return null
+    const job = await getJob(id)
+    if (!job) continue
+    if (job.status !== 'RENDER_QUEUED') continue // already claimed/cancelled
+    job.status = 'RENDERING'
+    if (job.render) {
+      job.render.claimedAt = Date.now()
+      job.render.workerId = workerId
+      job.render.progress = 'starting'
+    }
+    await saveJob(job)
+    return job
+  }
+  return null
+}
+
+/** Re-queue a job (e.g. worker died); puts it back at the head. */
+export async function requeueRender(jobId: string): Promise<void> {
+  await redisCmd(['LPUSH', RENDER_QUEUE_KEY, jobId])
 }

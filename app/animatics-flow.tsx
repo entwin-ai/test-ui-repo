@@ -24,6 +24,13 @@ interface CharacterView {
 
 type Step = 'upload' | 'characters' | 'screenplay' | 'approved'
 
+interface RenderState {
+  progress: string | null
+  driveLink: string | null
+  emailed: boolean
+  failure: string | null
+}
+
 interface JobState {
   id: string
   status: string
@@ -33,11 +40,19 @@ interface JobState {
   shotCount: number
   parseStats?: Record<string, number>
   documentUrl: string | null
+  render?: RenderState | null
   error?: string | null
 }
 
 function statusToStep(job: JobState | null): Step {
   if (!job) return 'upload'
+  if (
+    job.status === 'RENDER_QUEUED' ||
+    job.status === 'RENDERING' ||
+    job.status === 'RENDER_DONE' ||
+    job.status === 'RENDER_FAILED'
+  )
+    return 'approved' // render UI lives within the approved step view
   if (job.status === 'APPROVED') return 'approved'
   if (job.status === 'AWAITING_APPROVAL' || job.hasScreenplay) return 'screenplay'
   if (job.status === 'EXTRACTING') return 'characters'
@@ -392,6 +407,42 @@ export default function AnimaticsFlow({
     }
   }
 
+  // Phase 2 — queue the approved screenplay for video rendering.
+  async function startRender() {
+    if (!job) return
+    setBusy(true)
+    setError(null)
+    try {
+      const r = await fetch('/api/animatics/render', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId: job.id }),
+      })
+      const { ok, data: d, error: err } = await readResponse(r)
+      if (!ok) {
+        setError(err || 'Could not queue rendering.')
+        return
+      }
+      void d
+      await refreshStatus(job.id)
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // While a render is queued or in progress, poll status so the UI updates as
+  // the Colab worker reports progress and finally the Drive link.
+  useEffect(() => {
+    if (!job) return
+    if (job.status !== 'RENDER_QUEUED' && job.status !== 'RENDERING') return
+    const t = setInterval(() => {
+      refreshStatus(job.id)
+    }, 5000)
+    return () => clearInterval(t)
+  }, [job, refreshStatus])
+
   return (
     <div className="animatics-overlay" onClick={onClose}>
       <div className="animatics-modal" onClick={(e) => e.stopPropagation()}>
@@ -582,14 +633,67 @@ export default function AnimaticsFlow({
 
           {step === 'approved' && job && (
             <div className="animatics-done">
-              <div className="animatics-check">✓</div>
-              <p className="animatics-lead">
-                Screenplay approved with {job.shotCount} shots. This is ready for the Phase 2 video
-                pipeline.
-              </p>
-              <button className="animatics-primary" onClick={onClose}>
-                Done
-              </button>
+              {/* Not yet rendering — offer to start Phase 2. */}
+              {(job.status === 'APPROVED' || job.status === 'RENDER_FAILED') && (
+                <>
+                  <div className="animatics-check">✓</div>
+                  <p className="animatics-lead">
+                    Screenplay approved with {job.shotCount} shots. Generate the video next — it
+                    renders in the background and the download link is emailed to you when ready.
+                  </p>
+                  {job.status === 'RENDER_FAILED' && job.render?.failure && (
+                    <div className="animatics-error">
+                      Last render failed: {job.render.failure}
+                    </div>
+                  )}
+                  <button className="animatics-primary" disabled={busy} onClick={startRender}>
+                    {busy
+                      ? 'Queuing…'
+                      : job.status === 'RENDER_FAILED'
+                      ? 'Retry video generation'
+                      : 'Generate video'}
+                  </button>
+                </>
+              )}
+
+              {/* Queued / rendering — show live progress. */}
+              {(job.status === 'RENDER_QUEUED' || job.status === 'RENDERING') && (
+                <>
+                  <div className="animatics-spinner" />
+                  <p className="animatics-lead">
+                    {job.status === 'RENDER_QUEUED'
+                      ? 'Queued for rendering. Waiting for a render worker to pick it up…'
+                      : `Rendering your video…${
+                          job.render?.progress ? ` (${job.render.progress})` : ''
+                        }`}
+                  </p>
+                  <p className="animatics-hint">
+                    You can close this — the download link will be emailed to you when it&apos;s
+                    ready.
+                  </p>
+                </>
+              )}
+
+              {/* Done — show the link. */}
+              {job.status === 'RENDER_DONE' && (
+                <>
+                  <div className="animatics-check">✓</div>
+                  <p className="animatics-lead">
+                    Your video is ready{job.render?.emailed ? ' — the link was emailed to you' : ''}.
+                  </p>
+                  {job.render?.driveLink && (
+                    <a
+                      className="animatics-primary"
+                      href={job.render.driveLink}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ textDecoration: 'none', display: 'inline-block' }}
+                    >
+                      Open video in Google Drive
+                    </a>
+                  )}
+                </>
+              )}
             </div>
           )}
         </div>

@@ -44,6 +44,14 @@ export async function GET(req: NextRequest) {
         : null,
       parseStats: job.parseStats,
       documentUrl: job.docxBase64 ? `/api/animatics/document?jobId=${job.id}` : null,
+      render: job.render
+        ? {
+            progress: job.render.progress,
+            driveLink: job.render.driveLink,
+            emailed: !!job.render.emailedAt,
+            failure: job.render.failure,
+          }
+        : null,
       error: job.error,
     },
   })
