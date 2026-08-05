@@ -602,6 +602,11 @@ function ConnectorsView({
   // Whether an Animatics run currently exists (drives Connect/Disconnect label).
   const [animaticsConnected, setAnimaticsConnected] = useState(false)
 
+  // Index of the connector whose settings panel is open (null = closed).
+  const [settingsIdx, setSettingsIdx] = useState<number | null>(null)
+  const openConnectorSettings = (idx: number) => setSettingsIdx(idx)
+  const closeConnectorSettings = () => setSettingsIdx(null)
+
   // On mount, reflect any in-progress Animatics run so the button shows the
   // right label after a page reload.
   useEffect(() => {
@@ -820,13 +825,27 @@ function ConnectorsView({
               ) : (
                 <span className={`connector-status ${c.connected ? 'connected' : 'off'}`}>{statusText}</span>
               )}
-              <button
-                className={`connect-toggle ${(animatics ? animaticsConnected : c.connected) ? 'connected' : ''}`}
-                onClick={() => toggle(idx)}
-                disabled={c.scanning}
-              >
-                {btnLabel}
-              </button>
+              <div className="connector-actions">
+                <button
+                  type="button"
+                  className="connector-settings"
+                  aria-label={`${c.name} settings`}
+                  title="Settings"
+                  onClick={() => openConnectorSettings(idx)}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                  </svg>
+                </button>
+                <button
+                  className={`connect-toggle ${(animatics ? animaticsConnected : c.connected) ? 'connected' : ''}`}
+                  onClick={() => toggle(idx)}
+                  disabled={c.scanning}
+                >
+                  {btnLabel}
+                </button>
+              </div>
             </div>
           </div>
         )
@@ -838,7 +857,93 @@ function ConnectorsView({
         onConnectedChange={setAnimaticsConnected}
       />
     )}
+    {settingsIdx !== null && connectors[settingsIdx] && (
+      <ConnectorSettingsModal
+        connector={connectors[settingsIdx]}
+        onClose={closeConnectorSettings}
+      />
+    )}
     </>
+  )
+}
+
+/* ---------------- Connector settings modal ---------------- */
+
+function ConnectorSettingsModal({
+  connector,
+  onClose,
+}: {
+  connector: Connector
+  onClose: () => void
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const connected =
+    connector.service === 'whatsapp'
+      ? connector.wa?.state === 'connected'
+      : !!connector.connected
+
+  return (
+    <div className="conn-settings-overlay" role="dialog" aria-modal="true" aria-label={`${connector.name} settings`} onClick={onClose}>
+      <div className="conn-settings-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="conn-settings-head">
+          <div className="conn-settings-title">
+            {connector.icon ? (
+              <span className="connector-icon brand">{BRAND_ICONS[connector.icon]}</span>
+            ) : (
+              <span className="connector-icon">{connector.code}</span>
+            )}
+            <span>{connector.name}</span>
+          </div>
+          <button className="conn-settings-close" aria-label="Close" onClick={onClose}>×</button>
+        </div>
+
+        <div className="conn-settings-body">
+          <div className="conn-settings-row">
+            <span className="conn-settings-key">Source</span>
+            <span className="conn-settings-val">{connector.desc}</span>
+          </div>
+          <div className="conn-settings-row">
+            <span className="conn-settings-key">Status</span>
+            <span className={`conn-settings-val ${connected ? 'ok' : 'muted'}`}>
+              {connected ? 'Connected' : 'Not connected'}
+            </span>
+          </div>
+          {connector.connectedEmail && (
+            <div className="conn-settings-row">
+              <span className="conn-settings-key">Account</span>
+              <span className="conn-settings-val">{connector.connectedEmail}</span>
+            </div>
+          )}
+          {connector.slackTeam && (
+            <div className="conn-settings-row">
+              <span className="conn-settings-key">Workspace</span>
+              <span className="conn-settings-val">{connector.slackTeam}</span>
+            </div>
+          )}
+
+          <div className="conn-settings-section">Ingestion</div>
+          <label className="conn-settings-toggle">
+            <input type="checkbox" defaultChecked={connected} />
+            <span>Auto-sync on schedule</span>
+          </label>
+          <label className="conn-settings-toggle">
+            <input type="checkbox" defaultChecked />
+            <span>Include in vault retrieval</span>
+          </label>
+        </div>
+
+        <div className="conn-settings-foot">
+          <button className="connect-toggle" onClick={onClose}>Done</button>
+        </div>
+      </div>
+    </div>
   )
 }
 
