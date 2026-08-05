@@ -103,6 +103,12 @@ Reuses the app's existing config — no new variables required:
   episodes/chapters, those exact headings are preserved in the screenplay** —
   each becomes a styled heading (teal, page break before) above that episode's
   scenes. Novels split only by size get no injected headings.
+- Generation is robust to model output limits. Each episode is generated with a
+  generous token ceiling, segments are size-bounded so a single response stays
+  whole, and if a response is still truncated mid-JSON the parser **repairs** it
+  (closing open strings/arrays/objects) to recover the complete elements the
+  model emitted, rather than failing with a JSON error. A section that can't be
+  parsed at all is noted and skipped instead of aborting the whole run.
 - Generation runs **incrementally**: the screenplay route processes one segment
   per request, persisting progress to the job after each. The client re-calls
   until `done:true`, showing "part N/total". This keeps every request under the

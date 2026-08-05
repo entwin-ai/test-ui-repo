@@ -24,22 +24,113 @@ async function boundProvider(email: string) {
 }
 
 /**
- * Parse JSON from an LLM response even when the model wraps it in code fences
- * or adds a stray preamble/suffix. Falls back to slicing from the first '{' to
- * the last '}' so a chatty model doesn't break the pipeline.
+ * Parse JSON from an LLM response, tolerating three failure modes:
+ *   1. code fences / stray preamble around the JSON,
+ *   2. a chatty suffix after the JSON,
+ *   3. TRUNCATION — the model hit its output-token limit mid-JSON, leaving
+ *      unterminated strings/arrays/objects (the classic
+ *      "Expected ',' or ']' after array element" error).
+ *
+ * For (3) we attempt a structural repair: walk the text tracking string/escape
+ * state and bracket depth, drop any dangling partial token, and append the
+ * closing quotes/brackets needed to make it valid. This recovers as many
+ * complete array elements as the model managed to emit.
  */
 function parseLenientJson<T>(raw: string): T {
   const cleaned = stripJson(raw)
+
+  // Fast path.
   try {
     return JSON.parse(cleaned) as T
   } catch {
-    const first = cleaned.indexOf('{')
-    const last = cleaned.lastIndexOf('}')
-    if (first !== -1 && last > first) {
-      return JSON.parse(cleaned.slice(first, last + 1)) as T
-    }
-    throw new Error('Model did not return valid JSON.')
+    /* fall through to repair */
   }
+
+  // Narrow to the JSON object body.
+  const first = cleaned.indexOf('{')
+  if (first === -1) throw new Error('Model did not return valid JSON.')
+  const body = cleaned.slice(first)
+
+  // Try the simple slice-to-last-brace first (handles trailing chatter).
+  const lastBrace = body.lastIndexOf('}')
+  if (lastBrace > 0) {
+    try {
+      return JSON.parse(body.slice(0, lastBrace + 1)) as T
+    } catch {
+      /* fall through to structural repair */
+    }
+  }
+
+  return repairTruncatedJson(body) as T
+}
+
+/**
+ * Repair truncated JSON by closing open structures. Walks char-by-char to know
+ * whether we're inside a string, then trims any incomplete trailing token and
+ * appends the closing brackets in the right order.
+ */
+function repairTruncatedJson<T>(input: string): T {
+  const stack: string[] = [] // '{' or '['
+  let inString = false
+  let escaped = false
+  let lastSafe = -1 // index just after the last completed element/pair
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+    } else if (ch === '{' || ch === '[') {
+      stack.push(ch)
+    } else if (ch === '}' || ch === ']') {
+      stack.pop()
+      lastSafe = i + 1
+    } else if (ch === ',') {
+      lastSafe = i // cut at a comma → drop the partial element after it
+    }
+  }
+
+  // If the text ends inside an unterminated string and we have NO earlier safe
+  // boundary to fall back to (e.g. a single long "prose" string got cut), close
+  // the string so at least that value is recoverable.
+  let working = input
+  if (inString && lastSafe <= 0) {
+    working = input.replace(/\\+$/, '') + '"' // drop a dangling escape, close quote
+    lastSafe = working.length
+  }
+
+  // Take the text up to the last safe boundary (a completed element/pair).
+  let out = lastSafe > 0 ? working.slice(0, lastSafe) : working
+  // If we cut at a comma, remove it (can't have a trailing comma).
+  out = out.replace(/,\s*$/, '')
+
+  // Recompute the open structures for the trimmed text and close them,
+  // accounting for any still-open string.
+  const closeStack: string[] = []
+  let s = false
+  let esc = false
+  for (let i = 0; i < out.length; i++) {
+    const ch = out[i]
+    if (s) {
+      if (esc) esc = false
+      else if (ch === '\\') esc = true
+      else if (ch === '"') s = false
+      continue
+    }
+    if (ch === '"') s = true
+    else if (ch === '{') closeStack.push('}')
+    else if (ch === '[') closeStack.push(']')
+    else if (ch === '}' || ch === ']') closeStack.pop()
+  }
+  if (s) out += '"' // close a still-open string
+  while (closeStack.length) out += closeStack.pop()
+
+  return JSON.parse(out) as T
 }
 
 /**
@@ -93,8 +184,8 @@ export interface NovelSegment {
 
 export function segmentNovel(
   novel: string,
-  targetChars = 30000,
-  maxSegmentChars = 40000,
+  targetChars = 18000,
+  maxSegmentChars = 24000,
 ): NovelSegment[] {
   const lines = novel.split('\n')
 
@@ -337,10 +428,19 @@ export async function generateSegment(
   const raw = await provider.chatText({
     system: SCREENPLAY_SYSTEM,
     user: `CAST (use these exact names):\n${castLinesFor(characters)}\n\n${context}NOVEL PART:\n\n${segment.text}`,
-    maxTokens: 8000,
+    // Generous ceiling: a single episode's prose + shots can be large. Combined
+    // with per-segment generation and JSON-repair, this keeps responses whole.
+    maxTokens: 16000,
   })
 
-  const parsed = parseLenientJson<{ prose?: string; shots?: unknown }>(raw)
+  let parsed: { prose?: string; shots?: unknown }
+  try {
+    parsed = parseLenientJson<{ prose?: string; shots?: unknown }>(raw)
+  } catch {
+    // Even repair failed (rare). Return empty so the route notes the section as
+    // skipped and continues rather than failing the whole run.
+    return { prose: '', shots: [], label: segment.label, sourceHeading: segment.sourceHeading }
+  }
   const prose = String(parsed.prose || '').trim()
   const shots = normalizeShots(parsed.shots, sceneOffset, shotOffset)
   return { prose, shots, label: segment.label, sourceHeading: segment.sourceHeading }
