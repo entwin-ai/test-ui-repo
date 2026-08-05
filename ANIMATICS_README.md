@@ -39,12 +39,36 @@ through:
 
 | Route | Method | Purpose |
 |-------|--------|---------|
-| `parse` | POST (multipart) | validate `.txt`, strip junk, extract cast, create job |
+| `parse` | POST (multipart) | validate `.txt`, strip junk, create job — **LLM-free, instant** |
+| `characters` | POST | extract the cast (separate, retryable step) |
 | `headshot` | POST (multipart) | attach a headshot to one character |
-| `screenplay` | POST | generate prose + shot list, build `.docx` |
+| `screenplay` | POST | generate prose + shot list incrementally (call until `done`) |
 | `document` | GET / POST | download `.docx` / save edited prose (rebuilds `.docx`) |
 | `approve` | POST | re-parse edits into shot list, mark `APPROVED` |
 | `status` | GET | current job state (resumes the UI after reload) |
+
+### Why upload and extraction are split
+
+Character extraction is a slow LLM call. If it runs *inside* the upload request
+it can exceed the function timeout and return a 504
+(`FUNCTION_INVOCATION_TIMEOUT`). So `parse` only cleans + stores the novel and
+returns instantly; the client then calls `characters` (with automatic retry) to
+extract the cast. The upload can never time out on the LLM.
+
+## ⚠️ Vercel plan timeouts
+
+`maxDuration` above **60 seconds requires Vercel Pro/Enterprise**. On the
+**Hobby (free) plan every function is hard-capped at 60s** regardless of the
+`maxDuration` value in the code. The routes are tuned to fit within 60s per
+call:
+
+- `parse` — no LLM, sub-second.
+- `characters` — one small extraction call (novel is sampled, not read whole).
+- `screenplay` — **one segment per call**; the client loops until done, so no
+  single request needs more than one segment's worth of time.
+
+If you are on Pro, you can raise `SEGMENTS_PER_CALL` in
+`app/api/animatics/screenplay/route.ts` to process more segments per request.
 
 ## Environment
 

@@ -40,6 +40,7 @@ function statusToStep(job: JobState | null): Step {
   if (!job) return 'upload'
   if (job.status === 'APPROVED') return 'approved'
   if (job.status === 'AWAITING_APPROVAL' || job.hasScreenplay) return 'screenplay'
+  if (job.status === 'EXTRACTING') return 'characters'
   return 'characters'
 }
 
@@ -101,6 +102,7 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
   const [needsKey, setNeedsKey] = useState(false)
   const [editedProse, setEditedProse] = useState<string>('')
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
+  const [extracting, setExtracting] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
   const headshotRefs = useRef<Record<string, HTMLInputElement | null>>({})
 
@@ -114,11 +116,19 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
           setJob(d.job)
           setStep(statusToStep(d.job))
           if (d.job.screenplayProse) setEditedProse(d.job.screenplayProse)
+          // Job was uploaded but extraction hadn't finished — resume it.
+          if (d.job.status === 'EXTRACTING' && (!d.job.characters || d.job.characters.length === 0)) {
+            setExtracting(true)
+            const cast = await extractCast(d.job.id)
+            if (cast) setJob({ ...d.job, characters: cast, status: 'AWAITING_HEADSHOTS' })
+            setExtracting(false)
+          }
         }
       } catch {
         /* ignore — start fresh */
       }
     })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const refreshStatus = useCallback(async (jobId: string) => {
@@ -145,6 +155,7 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
     }
 
     setBusy(true)
+    setExtracting(false)
     try {
       const form = new FormData()
       form.append('story', file)
@@ -155,23 +166,69 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
         if (d.needsKey) setNeedsKey(true)
         return
       }
+      const jobId = d.jobId as string
+      // Upload succeeded instantly. Now extract the cast as a separate step so
+      // the slow LLM call can't time out the upload.
+      setStep('characters')
+      setExtracting(true)
+      const cast = await extractCast(jobId)
       setJob({
-        id: d.jobId as string,
-        status: d.status as string,
-        characters: d.characters as CharacterView[],
+        id: jobId,
+        status: cast ? 'AWAITING_HEADSHOTS' : 'EXTRACTING',
+        characters: cast || [],
         hasScreenplay: false,
         screenplayProse: null,
         shotCount: 0,
         parseStats: d.parseStats as Record<string, number>,
         documentUrl: null,
       })
-      setStep('characters')
     } catch (err) {
       setError((err as Error).message)
     } finally {
       setBusy(false)
+      setExtracting(false)
       if (fileRef.current) fileRef.current.value = ''
     }
+  }
+
+  /**
+   * Call the character-extraction step, retrying a couple of times on transient
+   * failures. Returns the cast, or null if it couldn't be extracted.
+   */
+  async function extractCast(jobId: string): Promise<CharacterView[] | null> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const r = await fetch('/api/animatics/characters', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jobId }),
+        })
+        const { ok, data: d, error: err } = await readResponse(r)
+        if (ok && Array.isArray(d.characters)) {
+          return d.characters as CharacterView[]
+        }
+        if (d.needsKey) {
+          setNeedsKey(true)
+          setError(err || 'No LLM key configured.')
+          return null
+        }
+        // Retryable server error — brief backoff then try again.
+        if (attempt < 2) {
+          await new Promise((res) => setTimeout(res, 1500))
+          continue
+        }
+        setError(err || 'Character extraction failed. You can retry.')
+        return null
+      } catch {
+        if (attempt < 2) {
+          await new Promise((res) => setTimeout(res, 1500))
+          continue
+        }
+        setError('Character extraction failed. You can retry.')
+        return null
+      }
+    }
+    return null
   }
 
   // Step 2 — upload a headshot for one character.
@@ -361,7 +418,41 @@ export default function AnimaticsFlow({ onClose }: { onClose: () => void }) {
             </div>
           )}
 
-          {step === 'characters' && job && (
+          {step === 'characters' && extracting && (
+            <div className="animatics-extracting">
+              <div className="animatics-spinner" />
+              <p className="animatics-lead">
+                Reading your novel and identifying the characters… this can take a moment for a
+                long book.
+              </p>
+            </div>
+          )}
+
+          {step === 'characters' && !extracting && job && job.characters.length === 0 && (
+            <div className="animatics-characters">
+              <p className="animatics-lead">
+                We couldn&apos;t identify the cast on the last try. This is usually transient —
+                please retry.
+              </p>
+              <button
+                className="animatics-primary"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true)
+                  setError(null)
+                  setExtracting(true)
+                  const cast = await extractCast(job.id)
+                  if (cast) setJob({ ...job, characters: cast, status: 'AWAITING_HEADSHOTS' })
+                  setExtracting(false)
+                  setBusy(false)
+                }}
+              >
+                {busy ? 'Retrying…' : 'Retry character extraction'}
+              </button>
+            </div>
+          )}
+
+          {step === 'characters' && !extracting && job && job.characters.length > 0 && (
             <div className="animatics-characters">
               <p className="animatics-lead">
                 Found {job.characters.length} character

@@ -1,18 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireUser } from '@/lib/gmail/route-helpers'
 import { cleanNovel, isUsableNovel } from '@/lib/animatics/parse'
-import { extractCharacters, NoLlmKeyError } from '@/lib/animatics/pipeline'
 import { createJob } from '@/lib/animatics/store'
 
 export const dynamic = 'force-dynamic'
-export const maxDuration = 60
+export const maxDuration = 30
 
 /**
  * POST /api/animatics/parse   (multipart form, field "story" = .txt file)
  *
- * Step 1 of Phase 1: validate the upload is a .txt, strip decorative junk,
- * extract the cast with the user's LLM key, and create a job. Returns the job
- * id + character list so the UI can start collecting headshots.
+ * Step 1 of Phase 1 — kept FAST and LLM-free so the upload always returns well
+ * within the function timeout (the earlier 504 was character extraction running
+ * inside this request). Here we only:
+ *   - validate the upload is a .txt
+ *   - strip decorative junk
+ *   - create the job in EXTRACTING state and store the cleaned novel
+ *
+ * Character extraction is a separate, retryable step: POST /api/animatics/characters.
  */
 export async function POST(req: NextRequest) {
   const auth = await requireUser()
@@ -58,32 +62,22 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const characters = await extractCharacters(auth.email, cleaned)
+    // No LLM here — instant. Extraction happens in the next step.
     const job = await createJob(
       auth.email,
       cleaned,
       stats as unknown as Record<string, number>,
-      characters,
+      [],
     )
     return NextResponse.json(
       {
         jobId: job.id,
-        status: job.status,
-        characters: job.characters.map((c) => ({
-          id: c.id,
-          name: c.name,
-          description: c.description,
-          role: c.role,
-          hasHeadshot: false,
-        })),
+        status: job.status, // 'EXTRACTING'
         parseStats: stats,
       },
       { status: 201 },
     )
   } catch (e) {
-    if (e instanceof NoLlmKeyError) {
-      return NextResponse.json({ error: e.message, needsKey: true }, { status: 400 })
-    }
     return NextResponse.json({ error: (e as Error).message }, { status: 500 })
   }
 }

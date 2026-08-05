@@ -37,6 +37,7 @@ async function redisCmd(args: (string | number)[]): Promise<unknown> {
 }
 
 export type JobStatus =
+  | 'EXTRACTING' //         novel stored, character extraction pending/in-flight
   | 'PARSED' //             novel cleaned, characters extracted, awaiting headshots
   | 'AWAITING_HEADSHOTS' // some characters still missing a headshot
   | 'GENERATING' //         screenplay LLM call in flight
@@ -128,7 +129,9 @@ export async function createJob(
   const job: Job = {
     id: crypto.randomUUID(),
     owner,
-    status: characters.length ? 'AWAITING_HEADSHOTS' : 'PARSED',
+    // No characters yet → EXTRACTING (a separate, retryable step does the LLM
+    // extraction so the upload request returns instantly and never times out).
+    status: characters.length ? 'AWAITING_HEADSHOTS' : 'EXTRACTING',
     createdAt: now,
     updatedAt: now,
     novel,

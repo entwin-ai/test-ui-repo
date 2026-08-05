@@ -43,14 +43,17 @@ function parseLenientJson<T>(raw: string): T {
 }
 
 /**
- * For CHARACTER EXTRACTION only, a head+tail sample is enough to find the cast
- * without reading every word — this keeps that one call cheap. Screenplay
- * generation does NOT use this; it reads the whole novel via segmentation.
+ * For CHARACTER EXTRACTION only, a modest sample is enough to find the cast
+ * without reading every word — the opening of a novel introduces essentially
+ * all the main characters. Kept small so the extraction LLM call returns
+ * quickly and never trips the function timeout. Screenplay generation does NOT
+ * use this; it reads the whole novel via segmentation.
  */
-function sampleForCast(novel: string, maxChars = 60000): string {
+function sampleForCast(novel: string, maxChars = 24000): string {
   if (novel.length <= maxChars) return novel
-  const head = novel.slice(0, Math.floor(maxChars * 0.7))
-  const tail = novel.slice(-Math.floor(maxChars * 0.3))
+  // Opening establishes most of the cast; a small tail catches late arrivals.
+  const head = novel.slice(0, Math.floor(maxChars * 0.8))
+  const tail = novel.slice(-Math.floor(maxChars * 0.2))
   return `${head}\n\n[...middle omitted for cast sampling...]\n\n${tail}`
 }
 
