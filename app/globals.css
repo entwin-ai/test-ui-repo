@@ -413,12 +413,14 @@
     padding: 20px;
   }
   .conn-settings-panel {
-    width: 100%; max-width: 420px;
+    width: 100%; max-width: 460px;
+    max-height: calc(100vh - 40px);
     background: #fff;
     border: 1px solid var(--border);
     border-radius: 14px;
     box-shadow: 0 20px 50px rgba(0, 0, 0, 0.22);
     overflow: hidden;
+    display: flex; flex-direction: column;
   }
   .conn-settings-head {
     display: flex; align-items: center; justify-content: space-between;
@@ -432,25 +434,126 @@
     font-size: 20px; line-height: 1; color: var(--text-muted);
   }
   .conn-settings-close:hover { color: var(--text-primary); }
-  .conn-settings-body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-  .conn-settings-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; }
-  .conn-settings-key { color: var(--text-muted); }
-  .conn-settings-val { color: var(--text-primary); text-align: right; word-break: break-word; }
-  .conn-settings-val.ok { color: var(--green); font-weight: 500; }
-  .conn-settings-val.muted { color: var(--text-muted); }
+  .conn-settings-body {
+    padding: 16px; display: flex; flex-direction: column; gap: 18px;
+    overflow-y: auto;
+  }
+
+  /* Connection status bar */
+  .conn-status-bar {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    background: var(--bg-subtle, #f6f5f2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .conn-status-text { font-size: 13px; }
+  .conn-status-text.ok { color: var(--green); font-weight: 600; }
+  .conn-status-text.muted { color: var(--text-muted); }
+  .conn-status-btn {
+    border: 1px solid var(--border);
+    background: #fff;
+    color: var(--text-primary);
+    font-size: 13px; font-weight: 500;
+    padding: 7px 16px; border-radius: 8px; cursor: pointer;
+  }
+  .conn-status-btn:hover:not(:disabled) { background: var(--bg-hover); }
+  .conn-status-btn.connected { border-color: var(--border); }
+  .conn-status-btn:disabled { opacity: 0.6; cursor: default; }
+
+  /* Disclaimer under card after disconnect */
+  .conn-disclaimer {
+    font-size: 12px; line-height: 1.5;
+    color: var(--text-muted);
+    background: rgba(29,131,206,0.06);
+    border: 1px solid rgba(29,131,206,0.18);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+
+  /* Generic field card (On-demand check) */
+  .conn-field-card {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .conn-field-main { display: flex; flex-direction: column; gap: 2px; }
+  .conn-field-title { font-size: 13.5px; font-weight: 500; color: var(--text-primary); }
+  .conn-field-sub { font-size: 12px; color: var(--text-muted); }
+  .conn-secondary-btn {
+    border: 1px solid var(--border);
+    background: #fff;
+    color: var(--text-primary);
+    font-size: 13px; font-weight: 500;
+    padding: 7px 16px; border-radius: 8px; cursor: pointer;
+    white-space: nowrap;
+  }
+  .conn-secondary-btn:hover { background: var(--bg-hover); }
+
+  /* Grouped field sections (Reading frequency, Ingestion window) */
+  .conn-field-group { display: flex; flex-direction: column; gap: 8px; }
+  .conn-field-heading { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+  .conn-field-desc { font-size: 12px; line-height: 1.5; color: var(--text-muted); }
+  .conn-field-inline {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    margin-top: 2px;
+  }
+  .conn-field-label { font-size: 13px; color: var(--text-primary); }
+
+  /* Integer stepper */
+  .int-stepper { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+  .int-stepper-field {
+    display: inline-flex; align-items: stretch;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: #fff;
+  }
+  .int-stepper.ro .int-stepper-field { background: var(--bg-hover); }
+  .int-stepper-btn {
+    border: none; background: #fff; cursor: pointer;
+    width: 30px; font-size: 16px; line-height: 1; color: var(--text-primary);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .int-stepper-btn:hover:not(:disabled) { background: var(--bg-hover); }
+  .int-stepper-btn:disabled { opacity: 0.35; cursor: default; }
+  .int-stepper-input {
+    width: 56px; text-align: center;
+    border: none; border-left: 1px solid var(--border); border-right: 1px solid var(--border);
+    font-size: 14px; color: var(--text-primary);
+    padding: 8px 6px; background: transparent;
+    -moz-appearance: textfield;
+  }
+  .int-stepper.ro .int-stepper-input {
+    border: none; color: var(--text-primary);
+  }
+  .int-stepper-input:focus { outline: none; }
+  .int-stepper-input::-webkit-outer-spin-button,
+  .int-stepper-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .int-stepper-input[readonly] { color: var(--text-primary); cursor: default; }
+  .int-stepper-suffix { font-size: 13px; color: var(--text-muted); }
+
   .conn-settings-section {
     margin-top: 4px; padding-top: 12px;
     border-top: 1px solid var(--border);
     font-size: 11px; font-weight: 600; text-transform: uppercase;
     letter-spacing: 0.04em; color: var(--text-muted);
   }
-  .conn-settings-toggle { display: flex; align-items: center; gap: 8px; font-size: 12.5px; cursor: pointer; }
-  .conn-settings-toggle input { cursor: pointer; }
   .conn-settings-foot {
-    padding: 12px 16px;
+    padding: 14px 16px;
     border-top: 1px solid var(--border);
-    display: flex; justify-content: flex-end;
+    display: flex; justify-content: flex-end; gap: 10px;
   }
+  .conn-foot-btn {
+    font-size: 13px; font-weight: 500;
+    padding: 9px 18px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--border);
+  }
+  .conn-foot-btn.ghost { background: #fff; color: var(--text-primary); }
+  .conn-foot-btn.ghost:hover { background: var(--bg-hover); }
+  .conn-foot-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .conn-foot-btn.primary:hover { background: var(--accent-dark); }
 
   /* ---- Settings view ---- */
   #settings-body {

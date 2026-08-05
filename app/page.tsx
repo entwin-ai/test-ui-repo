@@ -869,6 +869,110 @@ function ConnectorsView({
 
 /* ---------------- Connector settings modal ---------------- */
 
+// Per-source destination text shown in the disconnect alert + disclaimer.
+// Disconnecting a connector always happens at the source, not inside Entwin.
+function sourceSettingsLabel(connector: Connector): string {
+  switch (connector.service) {
+    case 'gmail':
+      return 'your Google Account permissions (myaccount.google.com → Security → Third-party access)'
+    case 'drive':
+      return 'your Google Account permissions (myaccount.google.com → Security → Third-party access)'
+    case 'slack':
+      return 'your Slack workspace settings (Apps → Manage → Entwin)'
+    case 'whatsapp':
+      return 'WhatsApp on your phone (Settings → Linked Devices)'
+    default:
+      break
+  }
+  switch (connector.icon) {
+    case 'calendar':
+      return 'your Google Account permissions (myaccount.google.com → Security → Third-party access)'
+    default:
+      break
+  }
+  if (connector.code === 'BH') {
+    return 'your browser’s connected-apps settings'
+  }
+  return 'the source application’s connected-apps settings'
+}
+
+// Human-readable label for the account/source that a connection targets.
+function sourceDisplayName(connector: Connector): string {
+  if (connector.service === 'gmail' || connector.service === 'drive' || connector.icon === 'calendar') {
+    return 'this Google account'
+  }
+  if (connector.service === 'slack') return 'this Slack workspace'
+  if (connector.service === 'whatsapp') return 'this WhatsApp account'
+  return 'this source'
+}
+
+// Small stepper input constrained to [min, max] integers.
+function IntegerStepper({
+  value,
+  min,
+  max,
+  onChange,
+  readOnly = false,
+  suffix,
+  ariaLabel,
+}: {
+  value: number
+  min: number
+  max: number
+  onChange?: (n: number) => void
+  readOnly?: boolean
+  suffix?: string
+  ariaLabel?: string
+}) {
+  const clamp = (n: number) => Math.min(max, Math.max(min, n))
+  const set = (n: number) => {
+    if (readOnly || !onChange) return
+    if (Number.isNaN(n)) return
+    onChange(clamp(Math.trunc(n)))
+  }
+  return (
+    <div className={`int-stepper ${readOnly ? 'ro' : ''}`}>
+      <div className="int-stepper-field">
+        {!readOnly && (
+          <button
+            type="button"
+            className="int-stepper-btn"
+            aria-label="Decrease"
+            onClick={() => set(value - 1)}
+            disabled={value <= min}
+          >
+            −
+          </button>
+        )}
+        <input
+          type="number"
+          className="int-stepper-input"
+          value={value}
+          min={min}
+          max={max}
+          step={1}
+          readOnly={readOnly}
+          aria-label={ariaLabel}
+          onChange={(e) => set(parseInt(e.target.value, 10))}
+          onBlur={(e) => set(parseInt(e.target.value, 10))}
+        />
+        {!readOnly && (
+          <button
+            type="button"
+            className="int-stepper-btn"
+            aria-label="Increase"
+            onClick={() => set(value + 1)}
+            disabled={value >= max}
+          >
+            +
+          </button>
+        )}
+      </div>
+      {suffix && <span className="int-stepper-suffix">{suffix}</span>}
+    </div>
+  )
+}
+
 function ConnectorSettingsModal({
   connector,
   onClose,
@@ -884,13 +988,60 @@ function ConnectorSettingsModal({
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  const connected =
+  const initiallyConnected =
     connector.service === 'whatsapp'
       ? connector.wa?.state === 'connected'
       : !!connector.connected
 
+  // Uniform connect/disconnect state, local to the modal (every connector
+  // behaves identically in this build — see Engineering Considerations).
+  const [connected, setConnected] = useState(initiallyConnected)
+  const [checking, setChecking] = useState(false)
+  const [showDisclaimer, setShowDisclaimer] = useState(false)
+
+  // In this build there is no UI to flip this — a re-connect always resolves
+  // to "still active at source", so it flips straight back to Disconnect.
+  const sourceStillActive = true
+
+  const [pollHours, setPollHours] = useState(24)
+  const [backfillDays, setBackfillDays] = useState(30)
+  const totalWindowDays = 365 // read-only for now
+
+  const handleConnectToggle = () => {
+    if (connected) {
+      // Disconnect must happen at the source.
+      window.alert(
+        `To disconnect ${connector.name}, you’ll need to remove Entwin from ${sourceSettingsLabel(connector)}. ` +
+          `Revoking access there stops all future ingestion.`,
+      )
+      setConnected(false)
+      setShowDisclaimer(true)
+      return
+    }
+    // Connect → brief "Checking…" then resolve.
+    setChecking(true)
+    window.setTimeout(() => {
+      setChecking(false)
+      if (sourceStillActive) {
+        // Access at the source is still live — flip straight back.
+        setConnected(true)
+        setShowDisclaimer(false)
+      } else {
+        // Genuinely new connection (unreachable in this build).
+        setConnected(true)
+        setShowDisclaimer(false)
+      }
+    }, 700)
+  }
+
   return (
-    <div className="conn-settings-overlay" role="dialog" aria-modal="true" aria-label={`${connector.name} settings`} onClick={onClose}>
+    <div
+      className="conn-settings-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`${connector.name} settings`}
+      onClick={onClose}
+    >
       <div className="conn-settings-panel" onClick={(e) => e.stopPropagation()}>
         <div className="conn-settings-head">
           <div className="conn-settings-title">
@@ -905,42 +1056,84 @@ function ConnectorSettingsModal({
         </div>
 
         <div className="conn-settings-body">
-          <div className="conn-settings-row">
-            <span className="conn-settings-key">Source</span>
-            <span className="conn-settings-val">{connector.desc}</span>
-          </div>
-          <div className="conn-settings-row">
-            <span className="conn-settings-key">Status</span>
-            <span className={`conn-settings-val ${connected ? 'ok' : 'muted'}`}>
+          {/* Connection status + connect/disconnect */}
+          <div className="conn-status-bar">
+            <span className={`conn-status-text ${connected ? 'ok' : 'muted'}`}>
               {connected ? 'Connected' : 'Not connected'}
             </span>
+            <button
+              type="button"
+              className={`conn-status-btn ${connected ? 'connected' : ''}`}
+              onClick={handleConnectToggle}
+              disabled={checking}
+            >
+              {checking ? 'Checking…' : connected ? 'Disconnect' : 'Connect'}
+            </button>
           </div>
-          {connector.connectedEmail && (
-            <div className="conn-settings-row">
-              <span className="conn-settings-key">Account</span>
-              <span className="conn-settings-val">{connector.connectedEmail}</span>
-            </div>
-          )}
-          {connector.slackTeam && (
-            <div className="conn-settings-row">
-              <span className="conn-settings-key">Workspace</span>
-              <span className="conn-settings-val">{connector.slackTeam}</span>
+
+          {showDisclaimer && !connected && (
+            <div className="conn-disclaimer" role="note">
+              Entwin has stopped reading from {sourceDisplayName(connector)} on your device. To fully revoke access,
+              remove Entwin from {sourceSettingsLabel(connector)}.
             </div>
           )}
 
-          <div className="conn-settings-section">Ingestion</div>
-          <label className="conn-settings-toggle">
-            <input type="checkbox" defaultChecked={connected} />
-            <span>Auto-sync on schedule</span>
-          </label>
-          <label className="conn-settings-toggle">
-            <input type="checkbox" defaultChecked />
-            <span>Include in vault retrieval</span>
-          </label>
+          {/* On-demand check */}
+          <div className="conn-field-card">
+            <div className="conn-field-main">
+              <div className="conn-field-title">On-demand check</div>
+              <div className="conn-field-sub">Last read: Never</div>
+            </div>
+            <button type="button" className="conn-secondary-btn">
+              Read Now
+            </button>
+          </div>
+
+          {/* Reading frequency */}
+          <div className="conn-field-group">
+            <div className="conn-field-heading">Reading frequency</div>
+            <div className="conn-field-desc">How often Entwin polls this connector for changes, in hours.</div>
+            <div className="conn-field-inline">
+              <span className="conn-field-label">Poll every</span>
+              <IntegerStepper
+                value={pollHours}
+                min={1}
+                max={24}
+                onChange={setPollHours}
+                suffix="hours"
+                ariaLabel="Poll frequency in hours"
+              />
+            </div>
+          </div>
+
+          {/* Ingestion window */}
+          <div className="conn-field-group">
+            <div className="conn-field-heading">Ingestion window</div>
+            <div className="conn-field-desc">
+              Controls how far back this {sourceDisplayName(connector)} is read. The initial ingestion is a one-time
+              backfill; the total ingestion window is the rolling range Entwin keeps indexed going forward.
+            </div>
+            <div className="conn-field-inline">
+              <span className="conn-field-label">Initial ingestion (one-time backfill)</span>
+              <IntegerStepper
+                value={backfillDays}
+                min={1}
+                max={100}
+                onChange={setBackfillDays}
+                suffix="days"
+                ariaLabel="Initial ingestion backfill in days"
+              />
+            </div>
+            <div className="conn-field-inline">
+              <span className="conn-field-label">Total ingestion window</span>
+              <IntegerStepper value={totalWindowDays} min={365} max={365} readOnly suffix="days" ariaLabel="Total ingestion window in days" />
+            </div>
+          </div>
         </div>
 
         <div className="conn-settings-foot">
-          <button className="connect-toggle" onClick={onClose}>Done</button>
+          <button className="conn-foot-btn ghost" onClick={onClose}>Close</button>
+          <button className="conn-foot-btn primary" onClick={onClose}>Save settings</button>
         </div>
       </div>
     </div>
