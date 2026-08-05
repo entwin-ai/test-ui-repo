@@ -19,12 +19,6 @@ type ProviderKey = 'claude' | 'gemini' | 'openai' | 'neocloud' | 'onprem'
 
 /* ---------------- Static data (from v3 HTML) ---------------- */
 
-const MODELS = [
-  { name: 'Claude Opus 4.8', desc: 'Most capable, best for complex work' },
-  { name: 'Claude Sonnet 5', desc: 'Balanced for everyday use' },
-  { name: 'Claude Haiku 4.5', desc: 'Fastest, best for quick tasks' },
-]
-
 const BRAND_ICONS: Record<string, JSX.Element> = {
   gmail: (
     <svg viewBox="0 0 48 48">
@@ -1884,7 +1878,7 @@ function MemoryGraph() {
 
 /* ---------------- Settings view ---------------- */
 
-function SettingsView({ entwinName, setEntwinName }: { entwinName: string; setEntwinName: (v: string) => void }) {
+function SettingsView({ entwinName, setEntwinName, onLlmConfigChange }: { entwinName: string; setEntwinName: (v: string) => void; onLlmConfigChange?: () => void }) {
   const [provider, setProvider] = useState<ProviderKey>('claude')
   const [selectedModel, setSelectedModel] = useState<Record<ProviderKey, string>>({
     claude: PROVIDER_MODELS.claude[0],
@@ -1957,6 +1951,7 @@ function SettingsView({ entwinName, setEntwinName }: { entwinName: string; setEn
       setSaved(true)
       setConfigured({ provider, model: selectedModel[provider] })
       setApiKey('') // clear from memory after save; key is write-only
+      onLlmConfigChange?.() // refresh the top-right model label app-wide
       setTimeout(() => setSaved(false), 1800)
     } catch (e) {
       setSaveErr((e as Error).message)
@@ -2114,9 +2109,11 @@ function AppShell() {
   const [view, setView] = useState<ViewKey>('chat')
   const [chatResetKey, setChatResetKey] = useState(0)
 
-  const [currentModel, setCurrentModel] = useState('Claude Sonnet 5')
-  const [modelMenuOpen, setModelMenuOpen] = useState(false)
-  const modelWrapRef = useRef<HTMLDivElement>(null)
+  // LLM label shown top-right on every tab. Reflects the user's configured
+  // model, or prompts to set an API key when none is stored. Loaded on mount and
+  // refreshed whenever the user saves a key in Settings (via refreshLlmLabel).
+  const [currentModel, setCurrentModel] = useState('')
+  const [llmConfigured, setLlmConfigured] = useState<boolean | null>(null) // null = still loading
 
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const userWrapRef = useRef<HTMLDivElement>(null)
@@ -2128,6 +2125,35 @@ function AppShell() {
   const [entwinName, setEntwinName] = useState('')
 
   const connectedCount = connectors.filter((c) => c.connected).length
+
+  // Load the user's LLM config for the top-right label. Kept in a callback so
+  // Settings can trigger a refresh right after the user saves a key.
+  const refreshLlmLabel = useMemo(
+    () => async () => {
+      try {
+        const res = await fetch('/api/settings/llm')
+        if (!res.ok) {
+          setLlmConfigured(false)
+          return
+        }
+        const d = await res.json()
+        if (d?.configured) {
+          setLlmConfigured(true)
+          setCurrentModel(d.model || d.provider || 'Model configured')
+        } else {
+          setLlmConfigured(false)
+          setCurrentModel('')
+        }
+      } catch {
+        setLlmConfigured(false)
+      }
+    },
+    [],
+  )
+
+  useEffect(() => {
+    refreshLlmLabel()
+  }, [refreshLlmLabel])
 
   // On mount, restore this user's saved connector state: the Connect/Disconnect
   // toggle of every card AND each card's settings. This runs FIRST; the
@@ -2447,7 +2473,6 @@ function AppShell() {
 
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
-      if (modelWrapRef.current && !modelWrapRef.current.contains(e.target as Node)) setModelMenuOpen(false)
       if (userWrapRef.current && !userWrapRef.current.contains(e.target as Node)) setUserMenuOpen(false)
     }
     document.addEventListener('click', onDoc)
@@ -2506,31 +2531,27 @@ function AppShell() {
       </div>
 
       <div id="main">
+        {/* Global model / API-key label, top-right of every tab. */}
+        {llmConfigured !== null && (
+          llmConfigured ? (
+            <div className="llm-status-label" title={`Active model: ${currentModel}`}>
+              {currentModel}
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="llm-status-label llm-status-unset"
+              onClick={() => setView('settings')}
+              title="No LLM API key set — click to configure"
+            >
+              Set API Key for LLM
+            </button>
+          )
+        )}
         {/* CHAT */}
         <div className={`view${view === 'chat' ? ' active' : ''}`} id="view-chat">
           <div className="view-header chat-header">
             <div>Chat<div className="sub">Local placeholder — no model connected yet</div></div>
-            <div className="model-picker-wrap" ref={modelWrapRef}>
-              <button className="model-picker-btn" onClick={(e) => { e.stopPropagation(); setModelMenuOpen((o) => !o) }}>
-                <span>{currentModel}</span>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9" /></svg>
-              </button>
-              <div className={`model-picker-menu${modelMenuOpen ? ' open' : ''}`}>
-                {MODELS.map((m) => (
-                  <button
-                    className={`model-option${m.name === currentModel ? ' selected' : ''}`}
-                    key={m.name}
-                    onClick={() => { setCurrentModel(m.name); setModelMenuOpen(false) }}
-                  >
-                    <span>
-                      <div className="model-option-name">{m.name}</div>
-                      <div className="model-option-desc">{m.desc}</div>
-                    </span>
-                    <svg className="model-option-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
-                  </button>
-                ))}
-              </div>
-            </div>
           </div>
           {view === 'chat' && <ChatView currentModel={currentModel} resetKey={chatResetKey} />}
         </div>
@@ -2548,7 +2569,7 @@ function AppShell() {
 
         {/* MEMORY */}
         <div className={`view${view === 'memory' ? ' active' : ''}`} id="view-memory">
-          <div className="view-header" style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+          <div className="view-header" style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', paddingRight: 200 }}>
             <span>{memoryTitle}<div className="sub">How the pieces your Entwin knows connect to each other</div></span>
             <RebuildGraphButton />
           </div>
@@ -2557,7 +2578,7 @@ function AppShell() {
 
         {/* SETTINGS */}
         <div className={`view${view === 'settings' ? ' active' : ''}`} id="view-settings">
-          <SettingsView entwinName={entwinName} setEntwinName={setEntwinName} />
+          <SettingsView entwinName={entwinName} setEntwinName={setEntwinName} onLlmConfigChange={refreshLlmLabel} />
         </div>
       </div>
 
