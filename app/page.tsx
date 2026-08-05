@@ -125,6 +125,18 @@ interface SlackScan {
   windowDays: number
 }
 
+// Per-connector settings persisted per user (mirrors lib/connectors/state.ts).
+interface ConnectorSettings {
+  pollHours: number
+  backfillDays: number
+  totalWindowDays: number
+}
+const DEFAULT_CONNECTOR_SETTINGS: ConnectorSettings = {
+  pollHours: 24,
+  backfillDays: 30,
+  totalWindowDays: 365,
+}
+
 interface Connector {
   name: string
   service: string | null
@@ -133,6 +145,11 @@ interface Connector {
   desc: string
   connected: boolean
   connectedEmail: string | null
+  // Stable per-card slug used to persist connect state + settings per user
+  // (see CONNECTOR_KEYS in lib/connectors/state.ts). Every card has one.
+  key: string
+  // Per-user settings for this card, loaded on mount and saved from the modal.
+  settings?: ConnectorSettings
   // Gmail cards get a stable id used by the real OAuth + scan backend.
   cardId?: 'gmail-personal' | 'gmail-professional'
   // Slack card gets its own stable id used by the real Slack OAuth + scan backend.
@@ -148,16 +165,38 @@ interface Connector {
 }
 
 const INITIAL_CONNECTORS: Connector[] = [
-  { name: 'Gmail — Personal', service: 'gmail', icon: 'gmail', cardId: 'gmail-personal', desc: 'Email ingestion for the vault.', connected: false, connectedEmail: null, scan: null },
-  { name: 'Gmail — Professional', service: 'gmail', icon: 'gmail', cardId: 'gmail-professional', desc: 'Email ingestion for the vault.', connected: false, connectedEmail: null, scan: null },
-  { name: 'Google Drive — Personal', service: 'drive', icon: 'drive', desc: 'Document ingestion for the vault.', connected: false, connectedEmail: null },
-  { name: 'Google Drive — Professional', service: 'drive', icon: 'drive', desc: 'Document ingestion for the vault.', connected: false, connectedEmail: null },
-  { name: 'Google Calendar', service: null, icon: 'calendar', desc: 'Meeting and scheduling context.', connected: false, connectedEmail: null },
-  { name: 'WhatsApp', service: 'whatsapp', code: 'WA', desc: 'Personal messages, vectorized into cross-channel memory.', connected: false, connectedEmail: null, wa: null },
-  { name: 'Animatics', service: null, icon: 'animatics', desc: 'Create Anime from your Novel', connected: false, connectedEmail: null },
-  { name: 'Slack', service: 'slack', icon: 'slack', slackCardId: 'slack-workspace', desc: 'Work channel ingestion — pulls the last 1 month of Slack chats.', connected: false, connectedEmail: null, slackScan: null },
-  { name: 'Browser history', service: null, code: 'BH', desc: 'Search activity as raw source.', connected: false, connectedEmail: null },
+  { name: 'Gmail — Personal', service: 'gmail', icon: 'gmail', cardId: 'gmail-personal', key: 'gmail-personal', desc: 'Email ingestion for the vault.', connected: false, connectedEmail: null, scan: null },
+  { name: 'Gmail — Professional', service: 'gmail', icon: 'gmail', cardId: 'gmail-professional', key: 'gmail-professional', desc: 'Email ingestion for the vault.', connected: false, connectedEmail: null, scan: null },
+  { name: 'Google Drive — Personal', service: 'drive', icon: 'drive', key: 'drive-personal', desc: 'Document ingestion for the vault.', connected: false, connectedEmail: null },
+  { name: 'Google Drive — Professional', service: 'drive', icon: 'drive', key: 'drive-professional', desc: 'Document ingestion for the vault.', connected: false, connectedEmail: null },
+  { name: 'Google Calendar', service: null, icon: 'calendar', key: 'calendar', desc: 'Meeting and scheduling context.', connected: false, connectedEmail: null },
+  { name: 'WhatsApp', service: 'whatsapp', code: 'WA', key: 'whatsapp', desc: 'Personal messages, vectorized into cross-channel memory.', connected: false, connectedEmail: null, wa: null },
+  { name: 'Animatics', service: null, icon: 'animatics', key: 'animatics', desc: 'Create Anime from your Novel', connected: false, connectedEmail: null },
+  { name: 'Slack', service: 'slack', icon: 'slack', slackCardId: 'slack-workspace', key: 'slack-workspace', desc: 'Work channel ingestion — pulls the last 1 month of Slack chats.', connected: false, connectedEmail: null, slackScan: null },
+  { name: 'Browser history', service: null, code: 'BH', key: 'browser-history', desc: 'Search activity as raw source.', connected: false, connectedEmail: null },
 ]
+
+/**
+ * Persist one connector card's state for the current user. Fire-and-forget:
+ * `connected` alone records a Connect/Disconnect click, `settings` alone records
+ * a "Save settings" click; either may be sent without disturbing the other.
+ * Returns true on success so callers that need to confirm (the modal) can.
+ */
+async function persistConnectorState(
+  connectorKey: string,
+  patch: { connected?: boolean; settings?: ConnectorSettings },
+): Promise<boolean> {
+  try {
+    const res = await fetch('/api/connectors/state', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ connectorKey, ...patch }),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
 
 const LIST_LABELS: Record<ListKey, string> = { marketing: 'Marketing', updates: 'Updates', people: 'People' }
 
@@ -641,6 +680,7 @@ function ConnectorsView({
         setConnectors((prev) =>
           prev.map((x, i) => (i === idx ? { ...x, connected: false } : x)),
         )
+        persistConnectorState(c.key, { connected: false })
       } else {
         // Connect — open the flow to begin a new run.
         setAnimaticsOpen(true)
@@ -655,6 +695,7 @@ function ConnectorsView({
         setConnectors((prev) =>
           prev.map((x, i) => (i === idx ? { ...x, connected: false, connectedEmail: null, wa: null } : x)),
         )
+        persistConnectorState(c.key, { connected: false })
         return
       }
       openWhatsApp()
@@ -675,6 +716,7 @@ function ConnectorsView({
             i === idx ? { ...x, connected: false, connectedEmail: null, scan: null, scanning: false } : x,
           ),
         )
+        persistConnectorState(c.key, { connected: false })
         return
       }
       // Connect: hand off to Google. This navigates the browser to the
@@ -699,6 +741,7 @@ function ConnectorsView({
               : x,
           ),
         )
+        persistConnectorState(c.key, { connected: false })
         return
       }
       // Connect: hand off to Slack. On return the app auto-pulls the last month.
@@ -706,7 +749,9 @@ function ConnectorsView({
       return
     }
 
-    // Everything else stays a local, static toggle (prototype behaviour).
+    // Everything else (Drive, Calendar, Browser history) has no backend of its
+    // own, so the toggle IS the persisted state. Flip locally, then save.
+    const nextConnected = !c.connected
     setConnectors((prev) =>
       prev.map((x, i) => {
         if (i !== idx) return x
@@ -714,6 +759,7 @@ function ConnectorsView({
         return { ...x, connected: true, connectedEmail: x.service ? 'alex.whitmore@gmail.com' : null }
       }),
     )
+    persistConnectorState(c.key, { connected: nextConnected })
   }
 
   return (
@@ -854,13 +900,35 @@ function ConnectorsView({
     {animaticsOpen && (
       <AnimaticsFlow
         onClose={() => setAnimaticsOpen(false)}
-        onConnectedChange={setAnimaticsConnected}
+        onConnectedChange={(v) => {
+          setAnimaticsConnected(v)
+          // Mirror the Animatics run existence into persisted connect state so
+          // the grid card paints the right label on the next reload.
+          persistConnectorState('animatics', { connected: v })
+        }}
       />
     )}
     {settingsIdx !== null && connectors[settingsIdx] && (
       <ConnectorSettingsModal
         connector={connectors[settingsIdx]}
         onClose={closeConnectorSettings}
+        onConnectChange={(next) => {
+          const key = connectors[settingsIdx].key
+          persistConnectorState(key, { connected: next })
+          setConnectors((prev) =>
+            prev.map((x) =>
+              x.key === key
+                ? { ...x, connected: next, ...(next ? {} : { connectedEmail: null }) }
+                : x,
+            ),
+          )
+        }}
+        onSettingsSaved={(settings) => {
+          const key = connectors[settingsIdx].key
+          setConnectors((prev) =>
+            prev.map((x) => (x.key === key ? { ...x, settings } : x)),
+          )
+        }}
       />
     )}
     </>
@@ -976,9 +1044,15 @@ function IntegerStepper({
 function ConnectorSettingsModal({
   connector,
   onClose,
+  onConnectChange,
+  onSettingsSaved,
 }: {
   connector: Connector
   onClose: () => void
+  // Persist + reflect a Connect/Disconnect made from inside the modal.
+  onConnectChange: (connected: boolean) => void
+  // Reflect saved settings back into the parent's connector list.
+  onSettingsSaved: (settings: ConnectorSettings) => void
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1003,9 +1077,13 @@ function ConnectorSettingsModal({
   // to "still active at source", so it flips straight back to Disconnect.
   const sourceStillActive = true
 
-  const [pollHours, setPollHours] = useState(24)
-  const [backfillDays, setBackfillDays] = useState(30)
-  const totalWindowDays = 365 // read-only for now
+  // Seed the steppers from this card's persisted per-user settings (falling
+  // back to defaults for a card the user has never saved).
+  const seed = connector.settings ?? DEFAULT_CONNECTOR_SETTINGS
+  const [pollHours, setPollHours] = useState(seed.pollHours)
+  const [backfillDays, setBackfillDays] = useState(seed.backfillDays)
+  const totalWindowDays = seed.totalWindowDays // read-only for now
+  const [saving, setSaving] = useState(false)
 
   const handleConnectToggle = () => {
     if (connected) {
@@ -1016,6 +1094,8 @@ function ConnectorSettingsModal({
       )
       setConnected(false)
       setShowDisclaimer(true)
+      // Persist + propagate the disconnect so the grid card and the DB agree.
+      onConnectChange(false)
       return
     }
     // Connect → brief "Checking…" then resolve.
@@ -1031,7 +1111,18 @@ function ConnectorSettingsModal({
         setConnected(true)
         setShowDisclaimer(false)
       }
+      onConnectChange(true)
     }, 700)
+  }
+
+  // Persist this card's settings for the current user, then close.
+  const handleSaveSettings = async () => {
+    setSaving(true)
+    const settings: ConnectorSettings = { pollHours, backfillDays, totalWindowDays }
+    await persistConnectorState(connector.key, { settings })
+    onSettingsSaved(settings)
+    setSaving(false)
+    onClose()
   }
 
   return (
@@ -1132,8 +1223,10 @@ function ConnectorSettingsModal({
         </div>
 
         <div className="conn-settings-foot">
-          <button className="conn-foot-btn ghost" onClick={onClose}>Close</button>
-          <button className="conn-foot-btn primary" onClick={onClose}>Save settings</button>
+          <button className="conn-foot-btn ghost" onClick={onClose} disabled={saving}>Close</button>
+          <button className="conn-foot-btn primary" onClick={handleSaveSettings} disabled={saving}>
+            {saving ? 'Saving…' : 'Save settings'}
+          </button>
         </div>
       </div>
     </div>
@@ -1963,6 +2056,45 @@ function AppShell() {
   const [entwinName, setEntwinName] = useState('')
 
   const connectedCount = connectors.filter((c) => c.connected).length
+
+  // On mount, restore this user's saved connector state: the Connect/Disconnect
+  // toggle of every card AND each card's settings. This runs FIRST; the
+  // real-backend hydrators below (Gmail return-flow, Slack status, WhatsApp
+  // status) run afterward and override the `connected` flag for the cards they
+  // authoritatively own — so a revoked-at-source connection can never be shown
+  // as connected just because it was once saved. Settings always come from here.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch('/api/connectors/state')
+        if (!res.ok) return
+        const { states } = (await res.json()) as {
+          states: Record<string, { connected: boolean; settings: ConnectorSettings }>
+        }
+        if (cancelled || !states) return
+        setConnectors((prev) =>
+          prev.map((c) => {
+            const saved = states[c.key]
+            if (!saved) return c
+            return {
+              ...c,
+              // Restore the saved toggle for backend-less cards. Backend-owned
+              // cards (gmail/slack/whatsapp) also get the saved value here as a
+              // fast paint; their status effects reconcile it moments later.
+              connected: saved.connected,
+              settings: saved.settings,
+            }
+          }),
+        )
+      } catch {
+        /* non-fatal: fall back to defaults */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // Kicks off a real Gmail scan: mark the card connected + scanning, pull the
   // deduped inbox/sent counts from the backend, then show them in small font.
