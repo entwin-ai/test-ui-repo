@@ -150,6 +150,10 @@ interface Connector {
   key: string
   // Per-user settings for this card, loaded on mount and saved from the modal.
   settings?: ConnectorSettings
+  // True once a settings row for this card exists in the DB for this user.
+  // The grid Connect button is enabled ONLY when this is true; the gear
+  // (settings) button stays enabled so the user can create the row first.
+  settingsPersisted?: boolean
   // Gmail cards get a stable id used by the real OAuth + scan backend.
   cardId?: 'gmail-personal' | 'gmail-professional'
   // Slack card gets its own stable id used by the real Slack OAuth + scan backend.
@@ -802,6 +806,15 @@ function ConnectorsView({
           ? 'Disconnect'
           : 'Connect'
 
+        // Gate the CONNECT action behind persisted settings: a box can only be
+        // connected once its settings row exists in the DB for this user.
+        // Disconnect is never gated (don't trap an already-connected box), and
+        // the gear/settings button is always enabled so the user can create the
+        // row first.
+        const isConnectedNow = animatics ? animaticsConnected : c.connected
+        const needsSettingsFirst = !c.settingsPersisted && !isConnectedNow
+        const connectDisabled = c.scanning || needsSettingsFirst
+
         return (
           <div className="connector-card" key={idx}>
             <div className="connector-top">
@@ -865,6 +878,12 @@ function ConnectorsView({
               </div>
             )}
 
+            {needsSettingsFirst && (
+              <div className="connector-settings-hint" role="note">
+                Configure settings (gear icon) and Save to enable Connect.
+              </div>
+            )}
+
             <div className="connector-bottom">
               {animatics ? (
                 <span className="connector-status off" style={{ visibility: 'hidden' }}></span>
@@ -887,7 +906,12 @@ function ConnectorsView({
                 <button
                   className={`connect-toggle ${(animatics ? animaticsConnected : c.connected) ? 'connected' : ''}`}
                   onClick={() => toggle(idx)}
-                  disabled={c.scanning}
+                  disabled={connectDisabled}
+                  title={
+                    needsSettingsFirst
+                      ? 'Open settings (gear) and click “Save settings” to enable Connect'
+                      : undefined
+                  }
                 >
                   {btnLabel}
                 </button>
@@ -926,7 +950,11 @@ function ConnectorsView({
         onSettingsSaved={(settings) => {
           const key = connectors[settingsIdx].key
           setConnectors((prev) =>
-            prev.map((x) => (x.key === key ? { ...x, settings } : x)),
+            prev.map((x) =>
+              // Saving writes a DB row → the grid Connect button becomes enabled
+              // for this card without needing a reload.
+              x.key === key ? { ...x, settings, settingsPersisted: true } : x,
+            ),
           )
         }}
       />
@@ -2084,6 +2112,8 @@ function AppShell() {
               // fast paint; their status effects reconcile it moments later.
               connected: saved.connected,
               settings: saved.settings,
+              // A row exists for this card → its grid Connect button is enabled.
+              settingsPersisted: true,
             }
           }),
         )
