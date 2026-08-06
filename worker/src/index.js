@@ -166,9 +166,9 @@ async function runCalibrate(acct, accessToken) {
 
   await admin
     .from('sync_state')
-    .update({ onboard_phase: 'awaiting_confirmation', updated_at: new Date().toISOString() })
+    .update({ onboard_phase: 'calibrated', updated_at: new Date().toISOString() })
     .eq('id', acct.id);
-  console.log(`[${acct.user_email}/${acct.card_id}] calibration done — awaiting confirmation`);
+  console.log(`[${acct.user_email}/${acct.card_id}] calibration (sender classification) done`);
 }
 
 // Daily deleted-email reconciliation (Email Ingestion Read Me, "Deleted email
@@ -393,17 +393,38 @@ async function main() {
         console.log(`[${acct.user_email}/${acct.card_id}] due (every ${pollHours}h) — running delta`);
       }
 
-      // calibrate and trash-reconcile are code/metadata only — no LLM key needed.
-      if (MODE === 'calibrate') {
-        const accessToken = await tokenFor(acct);
-        await runCalibrate(acct, accessToken);
-        console.log(`[${acct.user_email}/${acct.card_id}] calibrate done`);
-        continue;
-      }
+      // trash-reconcile is metadata only — no LLM key needed.
       if (MODE === 'trash-reconcile') {
         const accessToken = await tokenFor(acct);
         await runTrashReconcile(acct, accessToken);
         console.log(`[${acct.user_email}/${acct.card_id}] trash-reconcile done`);
+        continue;
+      }
+
+      // CALIBRATE = onboarding first pass. Classify senders (fast, header-only),
+      // then IMMEDIATELY run the full backfill in this same job so connecting an
+      // account actually ingests mail end-to-end. Sender classification runs
+      // first so the backfill routes each email to the right tier. The Kanban
+      // remains available for post-hoc corrections (which trigger their own
+      // sender-backfills), but ingestion no longer BLOCKS on a manual confirm.
+      if (MODE === 'calibrate') {
+        const accessToken = await tokenFor(acct);
+        await runCalibrate(acct, accessToken); // classify senders (no notes yet)
+
+        const llmConfig = await getLlmConfig(acct.user_email);
+        if (!llmConfig) {
+          // Can't write notes without an LLM key — leave senders classified and
+          // stop here; the delta cron will backfill once a key is set.
+          console.log(`[${acct.user_email}/${acct.card_id}] calibrated, but no LLM key — backfill deferred`);
+          continue;
+        }
+        const provider = makeProvider(llmConfig);
+        await runBackfill(acct, accessToken, provider); // ingest for real
+        await admin
+          .from('sync_state')
+          .update({ onboard_phase: 'done', backfill_done: true, updated_at: new Date().toISOString() })
+          .eq('id', acct.id);
+        console.log(`[${acct.user_email}/${acct.card_id}] calibrate + backfill done`);
         continue;
       }
 
