@@ -57,22 +57,20 @@
  */
 
 import crypto from 'crypto'
-import { getConnectorState, DEFAULT_SETTINGS, isConnectorKey } from '@/lib/connectors/state'
 
 const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly'
 const OAUTH_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
 const OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me'
 
-/** A backfill window of `days` days, expressed the way Gmail search wants it. */
-function windowQuery(days: number): string {
-  // The scan window must match the user's "Initial ingestion (one-time
-  // backfill)" setting (connector_state.settings.backfillDays) so the count the
-  // UI shows equals what the backfill will actually ingest. Formatted as
-  // Gmail's after:YYYY/MM/DD (raw epoch in after: is unreliable and silently
-  // drops results).
+/** One year of mail, expressed the way Gmail search wants it. */
+function windowQuery(): string {
+  // Last 1 year, consistently — computed the same way as the worker's backfill
+  // (worker/src/index.js runBackfill) so the scan count and the backfill
+  // coverage line up. Formatted as Gmail's after:YYYY/MM/DD (raw epoch in
+  // after: is unreliable and silently drops results).
   const d = new Date()
-  d.setDate(d.getDate() - Math.max(1, Math.trunc(days)))
+  d.setFullYear(d.getFullYear() - 1)
   const y = d.getFullYear()
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
@@ -450,9 +448,8 @@ const MAX_PAGES = 120 // 120 * 500 = up to 60,000 messages per label before capp
 async function countLabel(
   accessToken: string,
   labelId: 'INBOX' | 'SENT',
-  days: number,
 ): Promise<{ count: number; capped: boolean }> {
-  const q = windowQuery(days)
+  const q = windowQuery()
   let pageToken: string | undefined
   let total = 0
   let pages = 0
@@ -512,17 +509,11 @@ export async function scan(userEmail: string, cardId: string): Promise<GmailScan
   if (sess.state !== 'connected') throw new Error('Gmail is not connected for this card')
   const accessToken = await ensureAccessToken(userEmail, cardId, sess)
 
-  // Window comes from THIS user's "Initial ingestion (one-time backfill)"
-  // setting for THIS card, so the count shown equals what will be ingested.
-  // Falls back to the default if the user never saved settings.
-  const state = isConnectorKey(cardId) ? await getConnectorState(userEmail, cardId) : null
-  const days = state?.settings.backfillDays ?? DEFAULT_SETTINGS.backfillDays
-
   // Run both labels in parallel — they're independent, so worst-case wall time
   // is one label's worth of paging, not two.
   const [inbox, sent] = await Promise.all([
-    countLabel(accessToken, 'INBOX', days),
-    countLabel(accessToken, 'SENT', days),
+    countLabel(accessToken, 'INBOX'),
+    countLabel(accessToken, 'SENT'),
   ])
 
   const result: GmailScanResult = {

@@ -58,13 +58,12 @@ function ymd(date) {
 // Backfill: page message ids for a given label (INBOX or SENT), after a date.
 // Enumerating PER LABEL with the same after:YYYY/MM/DD the scan uses is what
 // makes the backfill's coverage match the scan's counts.
-export async function* listMessageIds(accessToken, { afterDate, labelId, pageToken, fromSender }) {
+export async function* listMessageIds(accessToken, { afterDate, labelId, pageToken }) {
   let token = pageToken || undefined;
   const afterStr = ymd(afterDate);
-  const q = fromSender ? `after:${afterStr} from:${fromSender}` : `after:${afterStr}`;
   do {
     const url = new URL(`${GMAIL_API}/messages`);
-    url.searchParams.set('q', q);
+    url.searchParams.set('q', `after:${afterStr}`);
     if (labelId) url.searchParams.set('labelIds', labelId);
     url.searchParams.set('maxResults', '100');
     url.searchParams.set('fields', 'messages/id,nextPageToken');

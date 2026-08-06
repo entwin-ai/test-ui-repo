@@ -43,34 +43,6 @@ export async function pollHoursFor(userEmail, cardId) {
   return clampHours(raw);
 }
 
-// "Initial ingestion (one-time backfill)" window, in days, from the user's saved
-// settings. Mirrors the UI stepper bounds (1..100) and the 30-day default so the
-// backfill ingests exactly the window the scan counted.
-const BACKFILL_MIN_DAYS = 1;
-const BACKFILL_MAX_DAYS = 100;
-const BACKFILL_DEFAULT_DAYS = 30;
-
-function clampDays(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v)) return BACKFILL_DEFAULT_DAYS;
-  return Math.min(BACKFILL_MAX_DAYS, Math.max(BACKFILL_MIN_DAYS, Math.trunc(v)));
-}
-
-export async function backfillDaysFor(userEmail, cardId) {
-  const { data, error } = await admin
-    .from('connector_state')
-    .select('settings')
-    .eq('user_email', userEmail)
-    .eq('connector_key', cardId)
-    .maybeSingle();
-  if (error) {
-    console.error(`[${userEmail}/${cardId}] backfillDays read failed:`, error.message);
-    return BACKFILL_DEFAULT_DAYS;
-  }
-  const raw = data && data.settings ? data.settings.backfillDays : undefined;
-  return clampDays(raw);
-}
-
 /**
  * Decide whether this account's delta is due now.
  * Due when it has never run (last_delta_at is null) or when at least
