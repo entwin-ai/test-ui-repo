@@ -19,7 +19,7 @@ import { getSlackSession } from './lib/redis-slack.js';
 import { captureSlack, ingestSlackBackfill, ingestSlackDelta } from './pipeline/slack.js';
 import { backfillEntities } from './entity-backfill.js';
 import { runPool } from './lib/pool.js';
-import { deltaDue, markDeltaRan } from './lib/schedule.js';
+import { deltaDue, markDeltaRan, backfillDaysFor } from './lib/schedule.js';
 
 // backfill | delta                    -> Gmail
 // whatsapp-sync                       -> WhatsApp: capture (drain offline) + vectorize, one bounded run
@@ -54,11 +54,13 @@ async function tokenFor(acct) {
 }
 
 async function runBackfill(acct, accessToken, provider) {
-  // Backfill window: the last 1 year, consistently. Computed the same way as the
-  // scan (see windowQuery in lib/gmail/service.ts) so scan counts and backfill
-  // coverage line up. The date is formatted as after:YYYY/MM/DD by listMessageIds.
+  // Backfill window comes from the user's "Initial ingestion (one-time backfill)"
+  // setting (connector_state.settings.backfillDays), so what gets ingested
+  // matches the count the scan showed at connect time. Falls back to 30 days.
+  // Formatted as after:YYYY/MM/DD by listMessageIds.
+  const days = await backfillDaysFor(acct.user_email, acct.card_id);
   const afterDate = new Date();
-  afterDate.setFullYear(afterDate.getFullYear() - 1);
+  afterDate.setDate(afterDate.getDate() - days);
 
   // Enumerate the SAME two labels the scan counts (INBOX + SENT), so backfill
   // coverage matches the scan's numbers. A message in both labels is de-duped
