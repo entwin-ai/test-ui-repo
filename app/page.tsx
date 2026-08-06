@@ -1258,31 +1258,80 @@ function ConnectorSettingsModal({
 /* ---------------- Dashboard view ---------------- */
 
 function KanbanPanel() {
-  const [senders, setSenders] = useState<Sender[]>(INITIAL_SENDERS)
-  const [confirmed, setConfirmed] = useState(false)
+  const [senders, setSenders] = useState<Sender[]>([])
+  const [loading, setLoading] = useState(true)
   const [moveNote, setMoveNote] = useState('')
   const draggedId = useRef<string | null>(null)
 
-  const drop = (listKey: ListKey) => {
+  const load = async () => {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/senders')
+      const data = await res.json().catch(() => ({ senders: [] }))
+      const rows: Sender[] = (data.senders || []).map((s: any) => ({
+        id: s.id,
+        name: s.address,
+        email: s.address,
+        list: s.list as ListKey,
+        isNew: s.isNew,
+      }))
+      setSenders(rows)
+    } catch {
+      setSenders([])
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { load() }, [])
+
+  const anyUnconfirmed = senders.some((s) => s.isNew)
+
+  const drop = async (listKey: ListKey) => {
     const id = draggedId.current
+    draggedId.current = null
     if (!id) return
     const sender = senders.find((s) => s.id === id)
-    if (sender && sender.list !== listKey) {
-      const ruleKey = `${sender.list}>${listKey}`
-      setMoveNote(`${sender.name}: ${MOVE_RULES[ruleKey]}`)
-      setSenders((prev) => prev.map((s) => (s.id === id ? { ...s, list: listKey } : s)))
-    }
-    draggedId.current = null
+    if (!sender || sender.list === listKey) return
+    const ruleKey = `${sender.list}>${listKey}`
+    if (MOVE_RULES[ruleKey]) setMoveNote(`${sender.name}: ${MOVE_RULES[ruleKey]}`)
+    // optimistic move + confirm; a manual move confirms the sender
+    setSenders((prev) => prev.map((s) => (s.id === id ? { ...s, list: listKey, isNew: false } : s)))
+    try {
+      await fetch('/api/senders', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, list: listKey }),
+      })
+    } catch { /* non-fatal; refetch on next load */ }
+  }
+
+  const confirmAll = async () => {
+    setSenders((prev) => prev.map((s) => ({ ...s, isNew: false })))
+    try {
+      await fetch('/api/senders', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmAll: true }),
+      })
+      // Confirming the sender lists also releases the full-history ingest for any
+      // Gmail account still in the onboarding calibration handshake.
+      await fetch('/api/gmail/confirm-onboarding', { method: 'POST' }).catch(() => {})
+    } catch { /* non-fatal */ }
   }
 
   return (
     <div className="dash-panel active" id="dash-kanban">
-      {!confirmed && (
+      {anyUnconfirmed && (
         <div className="kanban-banner" id="kanban-banner">
-          <div className="kanban-banner-text">Reviewing the last 90 days from account connection. Drag any miscategorized sender to the right column before confirming.</div>
-          <button className="kanban-confirm-btn" onClick={() => setConfirmed(true)}>Confirm classification</button>
+          <div className="kanban-banner-text">New and provisionally-sorted senders are highlighted. Drag any miscategorized sender to the right column, then confirm.</div>
+          <button className="kanban-confirm-btn" onClick={confirmAll}>Confirm classification</button>
         </div>
       )}
+      {loading ? (
+        <div className="entity-empty">Loading senders…</div>
+      ) : senders.length === 0 ? (
+        <div className="entity-empty">No senders classified yet. They appear here as email is ingested.</div>
+      ) : (
       <div className="kanban-board" id="kanban-board">
         {(['marketing', 'updates', 'people'] as ListKey[]).map((listKey) => {
           const cards = senders.filter((s) => s.list === listKey)
@@ -1305,65 +1354,296 @@ function KanbanPanel() {
                 <span className="kanban-column-count">{cards.length}</span>
               </div>
               <div className="kanban-cards">
-                {cards.map((s) => {
-                  const isNew = s.isNew && !confirmed
-                  return (
-                    <div
-                      className={`kanban-card${isNew ? ' is-new' : ''}`}
-                      key={s.id}
-                      draggable
-                      onDragStart={(e) => {
-                        draggedId.current = s.id
-                        e.currentTarget.classList.add('dragging')
-                      }}
-                      onDragEnd={(e) => e.currentTarget.classList.remove('dragging')}
-                    >
-                      <div className="kanban-card-name">{s.name}</div>
-                      <div className="kanban-card-email">{s.email}</div>
-                      {isNew && <div className="kanban-card-new-tag">New</div>}
-                    </div>
-                  )
-                })}
+                {cards.map((s) => (
+                  <div
+                    className={`kanban-card${s.isNew ? ' is-new' : ''}`}
+                    key={s.id}
+                    draggable
+                    onDragStart={(e) => {
+                      draggedId.current = s.id
+                      e.currentTarget.classList.add('dragging')
+                    }}
+                    onDragEnd={(e) => e.currentTarget.classList.remove('dragging')}
+                  >
+                    <div className="kanban-card-name">{s.name}</div>
+                    {s.isNew && <div className="kanban-card-new-tag">New</div>}
+                  </div>
+                ))}
               </div>
             </div>
           )
         })}
       </div>
+      )}
       <div className={`kanban-move-note${moveNote ? ' show' : ''}`} id="kanban-move-note">{moveNote}</div>
     </div>
   )
 }
 
+interface PendingEntity { id: string; name: string; aliases: string[]; candidateId: string | null; candidateName: string | null; score: number | null; references: number }
+interface SearchEntity { id: string; name: string; aliases: string[]; type?: string }
+
 function EntitiesPanel({ entities, setEntities }: { entities: Entity[]; setEntities: React.Dispatch<React.SetStateAction<Entity[]>> }) {
+  void entities; void setEntities // legacy props unused — panel owns its data now
+  const [pending, setPending] = useState<PendingEntity[]>([])
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState<string | null>(null)
+
+  const loadPending = async () => {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/entities/review')
+      const data = await res.json().catch(() => ({ pending: [] }))
+      setPending(data.pending || [])
+    } catch {
+      setPending([])
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { loadPending() }, [])
+
+  const act = async (url: string, body: object, id: string) => {
+    setBusy(id)
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (res.ok) setPending((p) => p.filter((e) => e.id !== id))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   return (
     <div className="dash-panel active" id="dash-entities">
+      {/* ---- Pending Review ---- */}
       <div className="section-heading">Pending review</div>
       <div id="entity-queue">
-        {entities.length === 0 ? (
+        {loading ? (
+          <div className="entity-empty">Loading…</div>
+        ) : pending.length === 0 ? (
           <div className="entity-empty">No entities waiting for review.</div>
         ) : (
-          entities.map((ent) => (
+          pending.map((ent) => (
             <div className="entity-card-v1" key={ent.id}>
               <div className="entity-card-v1-top">
                 <span className="entity-card-v1-name">{ent.name}</span>
-                <span className="entity-card-v1-score">match {ent.confidence}% &rarr; {ent.candidateId}</span>
+                {ent.candidateName && (
+                  <span className="entity-card-v1-score">
+                    {ent.score != null ? `match ${ent.score}%` : 'possible match'} &rarr; {ent.candidateName}
+                  </span>
+                )}
               </div>
-              <div className="entity-card-v1-meta">From {ent.noteId}, flagged {ent.flaggedDate}</div>
-              <div className="entity-card-v1-aliases">Aliases seen: {ent.aliases}</div>
+              <div className="entity-card-v1-meta">{ent.references} reference{ent.references === 1 ? '' : 's'}</div>
+              {ent.aliases.length > 0 && <div className="entity-card-v1-aliases">Aliases seen: {ent.aliases.join(', ')}</div>}
               <div className="entity-card-v1-actions">
-                <button className="entity-card-v1-btn approve" onClick={() => setEntities((p) => p.filter((e) => e.id !== ent.id))}>Merge into {ent.candidateId}</button>
-                <button className="entity-card-v1-btn" onClick={() => setEntities((p) => p.filter((e) => e.id !== ent.id))}>Create as new entity</button>
-                <button className="entity-card-v1-btn reject" onClick={() => setEntities((p) => p.filter((e) => e.id !== ent.id))}>Reject</button>
+                {ent.candidateId && (
+                  <button
+                    className="entity-card-v1-btn approve"
+                    disabled={busy === ent.id}
+                    onClick={() => act('/api/entities/merge', { sourceId: ent.id, targetId: ent.candidateId }, ent.id)}
+                  >
+                    Merge into {ent.candidateName}
+                  </button>
+                )}
+                <button
+                  className="entity-card-v1-btn reject"
+                  disabled={busy === ent.id}
+                  onClick={() => act('/api/entities/reject', { entityId: ent.id }, ent.id)}
+                >
+                  Keep as distinct
+                </button>
               </div>
             </div>
           ))
         )}
       </div>
+
+      {/* ---- New Review: manual merge + alias split ---- */}
+      <NewReviewPanel onChanged={loadPending} />
+    </div>
+  )
+}
+
+// New Review (v5 §4): user-initiated. Search all entities and merge any two;
+// click into an entity to split specific aliases out into a new entity.
+function NewReviewPanel({ onChanged }: { onChanged: () => void }) {
+  const [q, setQ] = useState('')
+  const [results, setResults] = useState<SearchEntity[]>([])
+  const [selected, setSelected] = useState<SearchEntity | null>(null)
+  const [mergeTarget, setMergeTarget] = useState<SearchEntity | null>(null)
+  const [checkedAliases, setCheckedAliases] = useState<Set<string>>(new Set())
+  const [msg, setMsg] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const search = async (term: string) => {
+    try {
+      const res = await fetch(`/api/entities/search?q=${encodeURIComponent(term)}`)
+      const data = await res.json().catch(() => ({ entities: [] }))
+      setResults(data.entities || [])
+    } catch {
+      setResults([])
+    }
+  }
+  useEffect(() => {
+    const t = setTimeout(() => search(q), 250)
+    return () => clearTimeout(t)
+  }, [q])
+
+  const pick = (e: SearchEntity) => {
+    setSelected(e)
+    setCheckedAliases(new Set())
+    setMergeTarget(null)
+    setMsg('')
+  }
+
+  const doMerge = async () => {
+    if (!selected || !mergeTarget || selected.id === mergeTarget.id) return
+    setBusy(true); setMsg('')
+    try {
+      const res = await fetch('/api/entities/merge', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceId: selected.id, targetId: mergeTarget.id }),
+      })
+      const d = await res.json().catch(() => ({}))
+      if (res.ok) { setMsg(`Merged "${selected.name}" into "${mergeTarget.name}".`); setSelected(null); search(q); onChanged() }
+      else setMsg(d.error || 'Merge failed')
+    } finally { setBusy(false) }
+  }
+
+  const doSplit = async () => {
+    if (!selected || checkedAliases.size === 0) return
+    setBusy(true); setMsg('')
+    try {
+      const res = await fetch('/api/entities/split', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fromId: selected.id, aliases: [...checkedAliases] }),
+      })
+      const d = await res.json().catch(() => ({}))
+      if (res.ok) { setMsg(`Split ${checkedAliases.size} alias(es) into a new entity.`); setSelected(null); search(q); onChanged() }
+      else setMsg(d.error || 'Split failed')
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <div className="new-review">
+      <div className="section-heading" style={{ marginTop: 28 }}>New review — merge or split</div>
+      <input
+        className="entity-search"
+        placeholder="Search entities by name…"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+      />
+      <div className="entity-search-results">
+        {results.map((e) => (
+          <button
+            key={e.id}
+            className={`entity-result${selected?.id === e.id ? ' selected' : ''}`}
+            onClick={() => pick(e)}
+          >
+            <span className="entity-result-name">{e.name}</span>
+            <span className="entity-result-alias-count">{e.aliases.length} alias{e.aliases.length === 1 ? '' : 'es'}</span>
+          </button>
+        ))}
+        {q && results.length === 0 && <div className="entity-empty">No matches.</div>}
+      </div>
+
+      {selected && (
+        <div className="entity-detail">
+          <div className="entity-detail-title">{selected.name}</div>
+
+          {/* Merge: pick a target */}
+          <div className="entity-detail-sub">Merge into another entity</div>
+          <div className="entity-search-results compact">
+            {results.filter((e) => e.id !== selected.id).map((e) => (
+              <button
+                key={e.id}
+                className={`entity-result${mergeTarget?.id === e.id ? ' selected' : ''}`}
+                onClick={() => setMergeTarget(e)}
+              >
+                <span className="entity-result-name">{e.name}</span>
+              </button>
+            ))}
+          </div>
+          <button className="entity-card-v1-btn approve" disabled={!mergeTarget || busy} onClick={doMerge}>
+            {mergeTarget ? `Merge "${selected.name}" → "${mergeTarget.name}"` : 'Pick a target above'}
+          </button>
+
+          {/* Split: check aliases to carve out */}
+          {selected.aliases.length > 1 && (
+            <>
+              <div className="entity-detail-sub" style={{ marginTop: 16 }}>Split aliases into a new entity</div>
+              <div className="entity-alias-list">
+                {selected.aliases.map((a) => (
+                  <label key={a} className="entity-alias-item">
+                    <input
+                      type="checkbox"
+                      checked={checkedAliases.has(a)}
+                      onChange={(e) => {
+                        setCheckedAliases((prev) => {
+                          const next = new Set(prev)
+                          if (e.target.checked) next.add(a); else next.delete(a)
+                          return next
+                        })
+                      }}
+                    />
+                    <span>{a}</span>
+                  </label>
+                ))}
+              </div>
+              <button className="entity-card-v1-btn" disabled={checkedAliases.size === 0 || busy} onClick={doSplit}>
+                Split {checkedAliases.size > 0 ? `${checkedAliases.size} ` : ''}alias(es) out
+              </button>
+            </>
+          )}
+        </div>
+      )}
+      {msg && <div className="new-review-msg">{msg}</div>}
     </div>
   )
 }
 
 interface Usage { inputTokens: number; outputTokens: number; calls: number; byKind: Record<string, { calls: number; input: number; output: number }> }
+
+// Two-entity display for a Memory Note (v5 §7). Shows, per resolved reference,
+// the entity resolved AT INGESTION vs the entity that owns it NOW. They agree in
+// the ordinary case; a divergence is the visible trace of a later merge/split,
+// surfaced (in amber) rather than hidden. Reusable wherever a note is rendered;
+// reads /api/notes/[id]/entities (the note_ownership index, never the frozen note).
+function NoteEntities({ noteId }: { noteId: string }) {
+  const [refs, setRefs] = useState<
+    { matchedAlias: string | null; resolved: { id: string; name: string | null }; current: { id: string; name: string | null }; diverged: boolean }[]
+  >([])
+  useEffect(() => {
+    let cancelled = false
+    fetch(`/api/notes/${noteId}/entities`)
+      .then((r) => r.json())
+      .then((d) => { if (!cancelled) setRefs(d.references || []) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [noteId])
+
+  if (refs.length === 0) return null
+  return (
+    <div className="note-entities">
+      {refs.map((r, i) => (
+        <div className="note-entity-row" key={i}>
+          <span className="note-entity-label">Resolved:</span>
+          <span>{r.resolved.name || '—'}</span>
+          {r.diverged && (
+            <>
+              <span className="note-entity-label">Current:</span>
+              <span className="note-entity-diverged">{r.current.name || '—'}</span>
+            </>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
 
 function OverviewPanel({ connectedCount, total, alertVisible, dismissAlert }: { connectedCount: number; total: number; alertVisible: boolean; dismissAlert: () => void }) {
   const [usage, setUsage] = useState<Usage | null>(null)
@@ -1482,6 +1762,17 @@ function OverviewPanel({ connectedCount, total, alertVisible, dismissAlert }: { 
 function DashboardView({ connectedCount, total, entities, setEntities }: { connectedCount: number; total: number; entities: Entity[]; setEntities: React.Dispatch<React.SetStateAction<Entity[]>> }) {
   const [tab, setTab] = useState<DashTab>('overview')
   const [alertVisible, setAlertVisible] = useState(true)
+  const [pendingCount, setPendingCount] = useState(0)
+
+  // Real pending-review count for the subtab badge.
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/entities/review')
+      .then((r) => r.json())
+      .then((d) => { if (!cancelled) setPendingCount((d.pending || []).length) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [tab])
 
   return (
     <>
@@ -1490,7 +1781,7 @@ function DashboardView({ connectedCount, total, entities, setEntities }: { conne
         <button className={`subtab-btn${tab === 'overview' ? ' active' : ''}`} onClick={() => setTab('overview')}>Overview</button>
         <button className={`subtab-btn${tab === 'kanban' ? ' active' : ''}`} onClick={() => setTab('kanban')}>Sender Kanban</button>
         <button className={`subtab-btn${tab === 'entities' ? ' active' : ''}`} onClick={() => setTab('entities')}>
-          Entity Review{entities.length > 0 && <span className="subtab-badge" id="entity-badge">{entities.length}</span>}
+          Entity Review{pendingCount > 0 && <span className="subtab-badge" id="entity-badge">{pendingCount}</span>}
         </button>
       </div>
       <div id="dashboard-body">

@@ -24,18 +24,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid or missing card id' }, { status: 400 })
   }
 
-  // 1. Ensure the sync_state row exists (idempotent upsert).
+  // 1. Ensure the sync_state row exists (idempotent upsert). Start onboarding at
+  //    the calibration phase — the full backfill waits until the user confirms
+  //    the sender classification on the Kanban (Email Ingestion Read Me).
   const { error: upErr } = await getSupabaseAdmin().from('sync_state').upsert(
-    { user_email: auth.email, card_id: card, backfill_done: false },
+    { user_email: auth.email, card_id: card, backfill_done: false, onboard_phase: 'calibrating' },
     { onConflict: 'user_email,card_id' },
   )
   if (upErr) {
     return NextResponse.json({ error: `sync_state: ${upErr.message}` }, { status: 500 })
   }
 
-  // 2. Dispatch the backfill workflow, scoped to this user + card.
+  // 2. Dispatch the 90-day CALIBRATION workflow (senders only, no Memory Notes),
+  //    scoped to this user + card. Full ingestion is dispatched later, after the
+  //    user confirms on the Kanban (see POST /api/gmail/confirm-onboarding).
   const gh = await fetch(
-    `https://api.github.com/repos/${process.env.GH_REPO}/actions/workflows/backfill.yml/dispatches`,
+    `https://api.github.com/repos/${process.env.GH_REPO}/actions/workflows/calibrate.yml/dispatches`,
     {
       method: 'POST',
       headers: {
@@ -54,5 +58,5 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'dispatch failed', detail }, { status: 502 })
   }
 
-  return NextResponse.json({ status: 'ingestion queued' }, { status: 202 })
+  return NextResponse.json({ status: 'calibration queued' }, { status: 202 })
 }

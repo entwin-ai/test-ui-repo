@@ -28,7 +28,7 @@ export async function ingestMessage(accessToken, acct, provider, gmailMsgId) {
   const clean = cleanBody({ text, html });
   const hash = contentHash(clean);
 
-  let decision = classify({ headers, sender });
+  let decision = await classify(user_email, { headers, sender });
 
   const { data: msgRow, error: msgErr } = await admin
     .from('email_message')
@@ -141,6 +141,16 @@ async function runMemoryPipeline(acct, provider, msgRow, m) {
     console.error(`[${user_email}] resolver:`, err.message);
   }
 
+  // action_edges (v5 §3/§6): link this note to prior Memory Notes in the SAME
+  // email thread, symmetrically. This is the note-to-note edge the schema
+  // defines — direction is read from date when needed, never stored. Email is
+  // the channel with a first-class thread signal (thread_id). Non-fatal.
+  try {
+    await linkThreadEdges(user_email, noteRow.id, msgRow.thread_id);
+  } catch (err) {
+    console.error(`[${user_email}] action_edges:`, err.message);
+  }
+
   // Full-body RAG with BATCHED embeddings: build all chunk texts, embed them in
   // ONE request, then bulk-insert. Chunk 0 carries a context header.
   const header = `From: ${m.sender} | Date: ${noteDate} | Subject: ${m.subject}\nSummary: ${note.raw_summary}`;
@@ -178,7 +188,54 @@ async function nextNoteId(userEmail, noteDate, source) {
   return `${noteDate.replace(/-/g, '')}-${source}-${seq}-${rand}`;
 }
 
-async function appendRollup(acct, date, kind, entry) {
+// Symmetric action_edges linking within one email thread. memory_note has no
+// thread_id of its own, so we resolve the thread through email_message: find
+// every email_message in this thread, then the memory_notes built from them.
+// Adds the new note to each prior note's action_edges and all priors to the new
+// note's. Direction is never stored (read from date when needed). Edges are
+// de-duplicated. No-op when there is no thread or no prior notes.
+async function linkThreadEdges(userEmail, newNoteRowId, threadId) {
+  if (!threadId) return;
+
+  // All email_message rows in this thread for this user.
+  const { data: msgs } = await admin
+    .from('email_message')
+    .select('id')
+    .eq('user_email', userEmail)
+    .eq('thread_id', threadId);
+  if (!msgs || msgs.length === 0) return;
+  const msgIds = msgs.map((r) => r.id);
+
+  // Memory notes built from those messages, excluding the one we just created.
+  const { data: priors } = await admin
+    .from('memory_note')
+    .select('id, action_edges')
+    .eq('user_email', userEmail)
+    .in('message_id', msgIds)
+    .neq('id', newNoteRowId);
+  if (!priors || priors.length === 0) return;
+
+  const priorIds = priors.map((p) => p.id);
+
+  // New note points at all priors.
+  await admin
+    .from('memory_note')
+    .update({ action_edges: priorIds })
+    .eq('id', newNoteRowId);
+
+  // Each prior gains the new note (de-duplicated).
+  for (const p of priors) {
+    const edges = new Set(p.action_edges || []);
+    if (edges.has(newNoteRowId)) continue;
+    edges.add(newNoteRowId);
+    await admin
+      .from('memory_note')
+      .update({ action_edges: [...edges] })
+      .eq('id', p.id);
+  }
+}
+
+export async function appendRollup(acct, date, kind, entry) {
   const { user_email, card_id } = acct;
   const rollupDate = date.toISOString().slice(0, 10);
   const { data: existing } = await admin
@@ -211,6 +268,6 @@ async function appendRollup(acct, date, kind, entry) {
   }
 }
 
-function hhmm(d) {
+export function hhmm(d) {
   return d.toISOString().slice(11, 16);
 }
