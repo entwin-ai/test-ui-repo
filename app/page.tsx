@@ -158,6 +158,12 @@ interface Connector {
   // Local UI state for the Gmail read/parse flow.
   scanning?: boolean
   scan?: GmailScan | null
+  // Gmail ingestion (gmail-calibrate worker) progress. `ingesting` while the
+  // job runs; `ingestDone` once complete; `ingestedCount` = emails ingested,
+  // read from the DB (email_message count) via /api/gmail/ingest-status.
+  ingesting?: boolean
+  ingestDone?: boolean
+  ingestedCount?: number | null
   // Local UI state for the Slack 1-month read flow.
   slackScan?: SlackScan | null
   slackTeam?: string | null
@@ -720,7 +726,7 @@ function ConnectorsView({
         }).catch(() => {})
         setConnectors((prev) =>
           prev.map((x, i) =>
-            i === idx ? { ...x, connected: false, connectedEmail: null, scan: null, scanning: false } : x,
+            i === idx ? { ...x, connected: false, connectedEmail: null, scan: null, scanning: false, ingesting: false, ingestDone: false, ingestedCount: null } : x,
           ),
         )
         persistConnectorState(c.key, { connected: false })
@@ -796,6 +802,22 @@ function ConnectorsView({
           statusText = 'Not connected'
         }
 
+        // Gmail ingestion overrides the desc + status: while the gmail-calibrate
+        // job runs, both "Email ingestion for the vault." and "Not connected"
+        // are replaced by a single in-progress line; once complete, the card
+        // shows the real ingested-email count from the DB.
+        let cardDesc: string = c.desc
+        if (gmail && c.connected) {
+          if (c.ingesting) {
+            cardDesc = 'Ingestion is in-progress'
+            statusText = 'Ingestion is in-progress'
+          } else if (c.ingestDone) {
+            const n = (c.ingestedCount ?? 0).toLocaleString()
+            cardDesc = `Total ${n} email${c.ingestedCount === 1 ? '' : 's'} ingested`
+            statusText = c.connectedEmail ? `Connected as ${c.connectedEmail}` : 'Connected'
+          }
+        }
+
         // Buttons: Gmail scanning shows a disabled "Reading…" state.
         const btnLabel = animatics
           ? animaticsConnected
@@ -828,11 +850,25 @@ function ConnectorsView({
               )}
               <div className="connector-name">{c.name}</div>
             </div>
-            <div className="connector-desc">{c.desc}</div>
+            <div className="connector-desc">{cardDesc}</div>
+
+            {/* Gmail ingestion state (gmail-calibrate worker) — takes over the
+                card while ingesting and after it completes. */}
+            {gmail && c.connected && c.ingesting && (
+              <div className="gmail-scan-summary">
+                <span className="gmail-scan-loading">Ingestion is in-progress…</span>
+              </div>
+            )}
+            {gmail && c.connected && c.ingestDone && (
+              <div className="gmail-scan-summary">
+                <span>Total {(c.ingestedCount ?? 0).toLocaleString()} email{c.ingestedCount === 1 ? '' : 's'} ingested</span>
+              </div>
+            )}
 
             {/* Gmail read summary — small font, inbox + sent counts over the
-                user-configured window (settings.backfillDays, default 30). */}
-            {gmail && c.connected && (c.scanning || c.scan) && (
+                user-configured window (settings.backfillDays, default 30).
+                Hidden once ingestion takes over the card. */}
+            {gmail && c.connected && !c.ingesting && !c.ingestDone && (c.scanning || c.scan) && (
               <div className="gmail-scan-summary">
                 {(() => {
                   const days = c.settings?.backfillDays ?? DEFAULT_CONNECTOR_SETTINGS.backfillDays
@@ -3011,10 +3047,10 @@ function AppShell() {
                 : c,
             ),
           )
-          // Kick off the async 1-year backfill (GitHub Actions worker). This is
-          // fire-and-forget: it registers the account for syncing and queues the
-          // ingestion job. Failure here doesn't affect the scan result already
-          // shown to the user.
+          // Kick off the async ingestion (gmail-calibrate GitHub Actions
+          // worker) and enter the "Ingestion is in-progress" state. A polling
+          // effect watches /api/gmail/ingest-status and flips to the ingested
+          // count when the job completes.
           fetch('/api/gmail/ingest', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -3022,6 +3058,13 @@ function AppShell() {
           }).catch(() => {
             /* non-fatal: backfill can be retried from the dashboard */
           })
+          setConnectors((prev) =>
+            prev.map((c) =>
+              c.cardId === cardId
+                ? { ...c, ingesting: true, ingestDone: false, ingestedCount: null }
+                : c,
+            ),
+          )
         } catch (e) {
           setGmailNotice(`Gmail scan failed: ${(e as Error).message}`)
           setConnectors((prev) =>
@@ -3236,6 +3279,62 @@ function AppShell() {
     })()
     return () => {
       cancelled = true
+    }
+  }, [])
+
+  // Gmail ingestion status: hydrate on mount and poll while a card is ingesting.
+  // The count and completion come from the DB (/api/gmail/ingest-status), which
+  // reflects what the gmail-calibrate worker has written — so a browser reload
+  // during ingestion resumes the "in-progress" state, and a completed job shows
+  // "Total X emails ingested" without any local memory of the run.
+  useEffect(() => {
+    let cancelled = false
+    const cards: NonNullable<Connector['cardId']>[] = ['gmail-personal', 'gmail-professional']
+
+    const poll = async () => {
+      await Promise.all(
+        cards.map(async (cardId) => {
+          try {
+            const res = await fetch(`/api/gmail/ingest-status?card=${cardId}`)
+            if (!res.ok) return
+            const st = (await res.json()) as {
+              ingestedCount: number
+              done: boolean
+              inProgress: boolean
+            }
+            if (cancelled) return
+            setConnectors((prev) =>
+              prev.map((c) => {
+                if (c.cardId !== cardId) return c
+                // Don't paint ingestion state on a card the user has disconnected;
+                // its sync_state may briefly linger. Connected cards only.
+                if (!c.connected) return c
+                // Only reflect ingestion state for a connected card that has a
+                // dispatched job (inProgress) or a completed one (done).
+                if (st.inProgress) {
+                  return { ...c, ingesting: true, ingestDone: false, ingestedCount: st.ingestedCount }
+                }
+                if (st.done) {
+                  return { ...c, ingesting: false, ingestDone: true, ingestedCount: st.ingestedCount }
+                }
+                return c
+              }),
+            )
+          } catch {
+            /* ignore — non-fatal */
+          }
+        }),
+      )
+    }
+
+    // Prime immediately, then poll on an interval. The interval is cheap (two
+    // head-count queries) and self-limiting: it only changes anything while a
+    // job is in progress.
+    poll()
+    const t = setInterval(poll, 5000)
+    return () => {
+      cancelled = true
+      clearInterval(t)
     }
   }, [])
 
