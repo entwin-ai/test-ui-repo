@@ -809,11 +809,13 @@ function ConnectorsView({
         let cardDesc: string = c.desc
         if (gmail && c.connected) {
           if (c.ingesting) {
-            cardDesc = 'Ingestion is in-progress'
+            // Only the blue status pill shows the in-progress state — leave the
+            // description line untouched to avoid repeating the same text.
             statusText = 'Ingestion is in-progress'
           } else if (c.ingestDone) {
-            const n = (c.ingestedCount ?? 0).toLocaleString()
-            cardDesc = `Total ${n} email${c.ingestedCount === 1 ? '' : 's'} ingested`
+            // The ingested-count line is shown once, in the summary block below;
+            // the blue pill shows the connected account. Leave the description
+            // line as-is so the text isn't repeated.
             statusText = c.connectedEmail ? `Connected as ${c.connectedEmail}` : 'Connected'
           }
         }
@@ -852,13 +854,9 @@ function ConnectorsView({
             </div>
             <div className="connector-desc">{cardDesc}</div>
 
-            {/* Gmail ingestion state (gmail-calibrate worker) — takes over the
-                card while ingesting and after it completes. */}
-            {gmail && c.connected && c.ingesting && (
-              <div className="gmail-scan-summary">
-                <span className="gmail-scan-loading">Ingestion is in-progress…</span>
-              </div>
-            )}
+            {/* Gmail ingestion state (gmail-calibrate worker). The in-progress
+                state is shown only by the blue status pill below; here we show
+                the ingested count once the job completes. */}
             {gmail && c.connected && c.ingestDone && (
               <div className="gmail-scan-summary">
                 <span>Total {(c.ingestedCount ?? 0).toLocaleString()} email{c.ingestedCount === 1 ? '' : 's'} ingested</span>
