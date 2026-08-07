@@ -7,15 +7,19 @@ import {
   listMessageIds,
   historySince,
   currentHistoryId,
+  getMessage,
+  extractParts,
 } from './lib/gmail.js';
 import { ingestMessage } from './pipeline/ingest.js';
+import { appendRollup, hhmm } from './pipeline/ingest.js';
+import { classify } from './lib/classify.js';
 import { ingestWhatsappBackfill, ingestWhatsappDelta } from './pipeline/whatsapp.js';
 import { captureWhatsapp } from './pipeline/whatsapp-capture.js';
 import { getSlackSession } from './lib/redis-slack.js';
 import { captureSlack, ingestSlackBackfill, ingestSlackDelta } from './pipeline/slack.js';
 import { backfillEntities } from './entity-backfill.js';
 import { runPool } from './lib/pool.js';
-import { deltaDue, markDeltaRan } from './lib/schedule.js';
+import { deltaDue, markDeltaRan, backfillDaysFor } from './lib/schedule.js';
 
 // backfill | delta                    -> Gmail
 // whatsapp-sync                       -> WhatsApp: capture (drain offline) + vectorize, one bounded run
@@ -26,6 +30,7 @@ const MODE = process.env.MODE || 'delta';
 const CONCURRENCY = Math.max(1, parseInt(process.env.INGEST_CONCURRENCY || '6', 10));
 const ONLY_USER = process.env.ONLY_USER || null; // optional single-user run
 const ONLY_CARD = process.env.ONLY_CARD || null; // optional single-card run
+const ONLY_SENDER = process.env.ONLY_SENDER || null; // optional single-sender backfill
 
 // The app writes a sync_state row when a Gmail card connects. That's the
 // worker's enumeration source (Redis keys are hashed, so not enumerable back to
@@ -49,11 +54,13 @@ async function tokenFor(acct) {
 }
 
 async function runBackfill(acct, accessToken, provider) {
-  // Backfill window: the last 1 year, consistently. Computed the same way as the
-  // scan (see windowQuery in lib/gmail/service.ts) so scan counts and backfill
-  // coverage line up. The date is formatted as after:YYYY/MM/DD by listMessageIds.
+  // Backfill window comes from the user's "Initial ingestion (one-time backfill)"
+  // setting (connector_state.settings.backfillDays), so what gets ingested
+  // matches the count the scan showed at connect time. Falls back to 30 days.
+  // Formatted as after:YYYY/MM/DD by listMessageIds.
+  const days = await backfillDaysFor(acct.user_email, acct.card_id);
   const afterDate = new Date();
-  afterDate.setFullYear(afterDate.getFullYear() - 1);
+  afterDate.setDate(afterDate.getDate() - days);
 
   // Enumerate the SAME two labels the scan counts (INBOX + SENT), so backfill
   // coverage matches the scan's numbers. A message in both labels is de-duped
@@ -124,6 +131,126 @@ async function runDelta(acct, accessToken, provider) {
       updated_at: new Date().toISOString(),
     })
     .eq('id', acct.id);
+}
+
+// Onboarding CALIBRATION (Email Ingestion Read Me, Onboarding). Pull the last
+// 90 days as a SAMPLE and classify senders into the three lists provisionally —
+// WITHOUT writing Memory Notes or rollups. This just populates
+// sender_classification so the user has something to confirm on the Kanban. No
+// LLM key is needed: classification is code-only. When done, park the account
+// at awaiting_confirmation so the full backfill waits for the user's confirm.
+async function runCalibrate(acct, accessToken) {
+  const afterDate = new Date();
+  afterDate.setDate(afterDate.getDate() - 90);
+  const labels = ['INBOX', 'SENT'];
+  const seen = new Set();
+
+  for (const labelId of labels) {
+    for await (const { ids } of listMessageIds(accessToken, { afterDate, labelId })) {
+      await runPool(ids, CONCURRENCY, async (id) => {
+        if (seen.has(id)) return;
+        seen.add(id);
+        try {
+          const raw = await getMessage(accessToken, id);
+          const { headers } = extractParts(raw);
+          const sender = headers['from'] || '';
+          // classify() reads/writes sender_classification; for an unseen sender
+          // it persists a PROVISIONAL row. That is the whole point of calibration.
+          await classify(acct.user_email, { headers, sender });
+        } catch (err) {
+          console.error(`[${acct.user_email}/${acct.card_id}] calibrate ${id}:`, err.message);
+        }
+      });
+    }
+  }
+
+  await admin
+    .from('sync_state')
+    .update({ onboard_phase: 'calibrated', updated_at: new Date().toISOString() })
+    .eq('id', acct.id);
+  console.log(`[${acct.user_email}/${acct.card_id}] calibration (sender classification) done`);
+}
+
+// Daily deleted-email reconciliation (Email Ingestion Read Me, "Deleted email
+// handling"). Check Gmail Trash against already-ingested message IDs (well
+// within Gmail's 30-day retention). For a deleted email that had produced a
+// Memory Note, flag the user directly. For one that landed in Ignore/Updates,
+// no notification — one line in a single per-day 'deletions' rollup. Nothing is
+// written on a zero-deletion day.
+async function runTrashReconcile(acct, accessToken) {
+  // Collect current Trash message IDs (bounded to the retention window).
+  const afterDate = new Date();
+  afterDate.setDate(afterDate.getDate() - 30);
+  const trashIds = new Set();
+  for await (const { ids } of listMessageIds(accessToken, { afterDate, labelId: 'TRASH' })) {
+    for (const id of ids) trashIds.add(id);
+  }
+  if (trashIds.size === 0) return;
+
+  // Which of those were ingested (are in our ledger) and at what tier?
+  const { data: rows } = await admin
+    .from('email_message')
+    .select('gmail_msg_id, sender, subject, tier, internal_date')
+    .eq('user_email', acct.user_email)
+    .in('gmail_msg_id', [...trashIds]);
+  if (!rows || rows.length === 0) return;
+
+  for (const r of rows) {
+    // Already reconciled? mark a flag on the ledger so we don't repeat daily.
+    if (r.tier === 'memory') {
+      // Significant: a deleted email that became a Memory Note. Flag the user.
+      await admin.from('email_message')
+        .update({ process_error: 'DELETED_AT_SOURCE_flagged' })
+        .eq('user_email', acct.user_email)
+        .eq('gmail_msg_id', r.gmail_msg_id);
+      // Surface it as a single-line entry too, so there is one place to look.
+      await appendRollup(acct, new Date(r.internal_date || Date.now()), 'deletions', {
+        time: hhmm(new Date(r.internal_date || Date.now())),
+        sender: r.sender,
+        subject: r.subject,
+        reason: 'memory-note-deleted',
+      });
+    } else {
+      // Ignore/Updates tier: no notification, just one rollup line.
+      await appendRollup(acct, new Date(r.internal_date || Date.now()), 'deletions', {
+        time: hhmm(new Date(r.internal_date || Date.now())),
+        sender: r.sender,
+        subject: r.subject,
+        reason: `${r.tier}-deleted`,
+      });
+    }
+  }
+  console.log(`[${acct.user_email}/${acct.card_id}] trash-reconcile: ${rows.length} ingested deletions`);
+}
+
+// Sender-move backfill (Email Ingestion Read Me, "Moving a sender between
+// lists", the two confirmed rows). When a sender is moved to a richer tier
+// (Marketing -> People or Marketing -> Updates), reprocess that ONE sender's
+// full history so past emails get the destination tier's shape — full Memory
+// Notes for People, Daily Updates entries for Updates. The move already updated
+// sender_classification, so ingestMessage's classify() will now route this
+// sender's mail to the richer tier. The ledger's unique (user_email,
+// gmail_msg_id) means already-ingested messages are handled idempotently.
+async function runSenderBackfill(acct, accessToken, provider, sender) {
+  // Full history for this sender (Gmail search: from:<sender>). No date floor
+  // beyond Gmail's own; use a wide window.
+  const afterDate = new Date('2004-01-01'); // Gmail epoch-ish; effectively "all"
+  const labels = ['INBOX', 'SENT'];
+  const seen = new Set();
+  for (const labelId of labels) {
+    for await (const { ids } of listMessageIds(accessToken, { afterDate, labelId, fromSender: sender })) {
+      await runPool(ids, CONCURRENCY, async (id) => {
+        if (seen.has(id)) return;
+        seen.add(id);
+        try {
+          await ingestMessage(accessToken, acct, provider, id);
+        } catch (err) {
+          console.error(`[${acct.user_email}/${acct.card_id}] sender-backfill ${id}:`, err.message);
+        }
+      });
+    }
+  }
+  console.log(`[${acct.user_email}/${acct.card_id}] sender-backfill for ${sender}: ${seen.size} messages`);
 }
 
 async function main() {
@@ -266,6 +393,41 @@ async function main() {
         console.log(`[${acct.user_email}/${acct.card_id}] due (every ${pollHours}h) — running delta`);
       }
 
+      // trash-reconcile is metadata only — no LLM key needed.
+      if (MODE === 'trash-reconcile') {
+        const accessToken = await tokenFor(acct);
+        await runTrashReconcile(acct, accessToken);
+        console.log(`[${acct.user_email}/${acct.card_id}] trash-reconcile done`);
+        continue;
+      }
+
+      // CALIBRATE = onboarding first pass. Classify senders (fast, header-only),
+      // then IMMEDIATELY run the full backfill in this same job so connecting an
+      // account actually ingests mail end-to-end. Sender classification runs
+      // first so the backfill routes each email to the right tier. The Kanban
+      // remains available for post-hoc corrections (which trigger their own
+      // sender-backfills), but ingestion no longer BLOCKS on a manual confirm.
+      if (MODE === 'calibrate') {
+        const accessToken = await tokenFor(acct);
+        await runCalibrate(acct, accessToken); // classify senders (no notes yet)
+
+        const llmConfig = await getLlmConfig(acct.user_email);
+        if (!llmConfig) {
+          // Can't write notes without an LLM key — leave senders classified and
+          // stop here; the delta cron will backfill once a key is set.
+          console.log(`[${acct.user_email}/${acct.card_id}] calibrated, but no LLM key — backfill deferred`);
+          continue;
+        }
+        const provider = makeProvider(llmConfig);
+        await runBackfill(acct, accessToken, provider); // ingest for real
+        await admin
+          .from('sync_state')
+          .update({ onboard_phase: 'done', backfill_done: true, updated_at: new Date().toISOString() })
+          .eq('id', acct.id);
+        console.log(`[${acct.user_email}/${acct.card_id}] calibrate + backfill done`);
+        continue;
+      }
+
       const llmConfig = await getLlmConfig(acct.user_email);
       if (!llmConfig) {
         console.log(`[${acct.user_email}/${acct.card_id}] no LLM key set — skipping`);
@@ -274,6 +436,10 @@ async function main() {
       const provider = makeProvider(llmConfig);
       const accessToken = await tokenFor(acct);
       if (MODE === 'backfill') await runBackfill(acct, accessToken, provider);
+      else if (MODE === 'sender-backfill') {
+        if (!ONLY_SENDER) { console.log('sender-backfill requires ONLY_SENDER — skipping'); continue; }
+        await runSenderBackfill(acct, accessToken, provider, ONLY_SENDER);
+      }
       else await runDelta(acct, accessToken, provider);
       console.log(`[${acct.user_email}/${acct.card_id}] ${MODE} done`);
     } catch (err) {
