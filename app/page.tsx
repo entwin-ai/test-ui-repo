@@ -821,17 +821,34 @@ function ConnectorsView({
             </div>
             <div className="connector-desc">{c.desc}</div>
 
-            {/* Gmail read summary — small font, inbox + sent counts. */}
+            {/* Gmail read summary — small font, inbox + sent counts over the
+                user-configured window (settings.backfillDays, default 30). */}
             {gmail && c.connected && (c.scanning || c.scan) && (
               <div className="gmail-scan-summary">
-                {c.scanning ? (
-                  <span className="gmail-scan-loading">Reading your last 12 months of mail…</span>
-                ) : c.scan ? (
-                  <>
-                    <span>Inbox read: {c.scan.inboxCount.toLocaleString()} messages</span>
-                    <span>Sent read: {c.scan.sentCount.toLocaleString()} messages</span>
-                  </>
-                ) : null}
+                {(() => {
+                  const days = c.settings?.backfillDays ?? DEFAULT_CONNECTOR_SETTINGS.backfillDays
+                  const windowLabel = `last ${days} day${days === 1 ? '' : 's'}`
+                  if (c.scanning) {
+                    return (
+                      <span className="gmail-scan-loading">
+                        Reading your {windowLabel} of mail…
+                      </span>
+                    )
+                  }
+                  if (c.scan) {
+                    return (
+                      <>
+                        <span>
+                          Inbox ({windowLabel}): {c.scan.inboxCount.toLocaleString()} emails
+                        </span>
+                        <span>
+                          Sent ({windowLabel}): {c.scan.sentCount.toLocaleString()} emails
+                        </span>
+                      </>
+                    )
+                  }
+                  return null
+                })()}
               </div>
             )}
 
@@ -2707,6 +2724,57 @@ function AppShell() {
       window.history.replaceState({}, '', window.location.pathname)
     }
   }, [runGmailScan])
+
+  // On mount, hydrate BOTH Gmail cards from their server-side session so a
+  // connected account — its email, its last inbox/sent counts, and therefore
+  // the Connect/Disconnect button state — survives a page refresh. Without
+  // this, the connector-state hydrator above restores only the `connected`
+  // flag (a fast paint), but the scan counts and connected email would be lost
+  // on reload, and if the source token was revoked the card would wrongly stay
+  // "connected". This is the Gmail equivalent of the Slack hydrator below and
+  // is authoritative for these cards' connected flag.
+  useEffect(() => {
+    let cancelled = false
+    const cards: NonNullable<Connector['cardId']>[] = ['gmail-personal', 'gmail-professional']
+    ;(async () => {
+      await Promise.all(
+        cards.map(async (cardId) => {
+          try {
+            const res = await fetch(`/api/gmail/status?card=${cardId}`)
+            if (!res.ok) return
+            const st = (await res.json()) as {
+              state: string
+              connectedEmail: string | null
+              scan: { inboxCount: number; sentCount: number } | null
+            }
+            if (cancelled) return
+            const connected = st.state === 'connected'
+            setConnectors((prev) =>
+              prev.map((c) =>
+                c.cardId === cardId
+                  ? {
+                      ...c,
+                      connected,
+                      connectedEmail: connected ? st.connectedEmail : null,
+                      // Restore prior counts; clear them if not connected.
+                      scan: connected && st.scan
+                        ? { inboxCount: st.scan.inboxCount, sentCount: st.scan.sentCount }
+                        : null,
+                      scanning: false,
+                    }
+                  : c,
+              ),
+            )
+          } catch {
+            /* ignore — connector-state hydrator already painted a best guess */
+          }
+        }),
+      )
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // On mount, hydrate the Slack card from server state so a connected
   // workspace (and its last read) survives a page refresh.
