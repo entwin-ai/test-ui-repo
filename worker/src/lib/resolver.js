@@ -163,6 +163,32 @@ async function resolveOne(userEmail, rawName, noteDate) {
   return { id: created.id, matchedAlias: display };
 }
 
+// Record a mention + note-ownership row for an ALREADY-resolved entity id (one
+// whose resolution happened outside the name-based resolveOne path — e.g. the
+// WhatsApp phone-first resolver). Same idempotent upserts and matched_alias
+// bookkeeping as resolveEntitiesForNote, for a single known entity.
+export async function recordResolvedEntity(userEmail, noteRowId, entityId, matchedAlias) {
+  if (!entityId) return;
+  await admin
+    .from('entity_mention')
+    .upsert(
+      { user_email: userEmail, entity_id: entityId, note_id: noteRowId, matched_alias: matchedAlias },
+      { onConflict: 'user_email,entity_id,note_id' }
+    );
+  await admin
+    .from('note_ownership')
+    .upsert(
+      {
+        user_email: userEmail,
+        note_id: noteRowId,
+        resolved_entity_id: entityId,
+        current_entity_id: entityId,
+        matched_alias: matchedAlias,
+      },
+      { onConflict: 'user_email,note_id,resolved_entity_id' }
+    );
+}
+
 // Resolve all related_entities of a note and record BOTH the mention and the
 // note-ownership index row, each carrying matched_alias. Idempotent:
 //   - entity_mention upsert on (user_email, entity_id, note_id)

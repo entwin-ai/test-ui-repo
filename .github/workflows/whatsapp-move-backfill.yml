@@ -1,0 +1,56 @@
+name: whatsapp-move-backfill
+
+# Dispatched by PATCH /api/whatsapp/entities when the user drags an entity from
+# the Updates column to the Important column on the WhatsApp Kanban (Read Me §8).
+# It re-expands that ONE entity's past Updates days (one-line gists) into full
+# facet-split Memory Notes. This can be heavy at community scale (a stale subgroup
+# carrying months of daily gists), which is exactly why it runs here as its own
+# dispatched job rather than inline in the web request. Idempotent: re-running
+# produces the same end state.
+on:
+  workflow_dispatch:
+    inputs:
+      user_email:
+        description: 'Scope to one user email (required)'
+        required: true
+        default: ''
+      identity_key:
+        description: 'The WhatsApp entity identity key to re-expand (phone / group id / community id)'
+        required: true
+        default: ''
+
+concurrency:
+  # Never overlap two backfills for the same entity, and don't fight a sync for
+  # the same user (both write memory_note for that user).
+  group: wa-move-${{ github.event.inputs.user_email }}-${{ github.event.inputs.identity_key }}
+  cancel-in-progress: false
+
+jobs:
+  move-backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    environment: ingestion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install
+        working-directory: worker
+        run: npm install --omit=dev
+      - name: Run WhatsApp move backfill
+        working-directory: worker
+        env:
+          MODE: whatsapp-move-backfill
+          ONLY_USER: ${{ github.event.inputs.user_email }}
+          ONLY_IDENTITY_KEY: ${{ github.event.inputs.identity_key }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          ENTWIN_KEY_SECRET: ${{ secrets.ENTWIN_KEY_SECRET }}
+          CLAUDE_EMBED_MODEL: ${{ secrets.CLAUDE_EMBED_MODEL }}
+          OPENAI_EMBED_MODEL: ${{ secrets.OPENAI_EMBED_MODEL }}
+          GEMINI_EMBED_MODEL: ${{ secrets.GEMINI_EMBED_MODEL }}
+          INGEST_CONCURRENCY: ${{ vars.INGEST_CONCURRENCY }}
+        run: npm start

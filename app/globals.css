@@ -1131,6 +1131,39 @@
   }
   .kanban-move-note.show { display: block; }
 
+  /* ---- WhatsApp Kanban: two columns, search, scroll, card meta ---- */
+  .kanban-board-two { grid-template-columns: repeat(2, 1fr); }
+  .kanban-search-row { margin-bottom: 12px; }
+  .kanban-search {
+    width: 100%;
+    box-sizing: border-box;
+    font-size: 12.5px;
+    padding: 8px 11px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--text-primary);
+  }
+  .kanban-search:focus { outline: none; border-color: var(--blue); }
+  /* Community-subgroup volume can be large, so each column scrolls. */
+  .kanban-column-scroll { max-height: 62vh; overflow-y: auto; }
+  .kanban-card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 5px;
+  }
+  .kanban-tag {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: var(--bg-hover, rgba(0,0,0,0.05));
+    border: 1px solid var(--border);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
   /* ---- Entity review queue ---- */
   .entity-row {
     display: flex;
@@ -1316,6 +1349,18 @@
   .entity-card-v1-score { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
   .entity-card-v1-meta { font-size: 11.5px; color: var(--text-secondary); }
   .entity-card-v1-aliases { font-size: 11px; color: var(--text-muted); }
+  .entity-card-v1-numberchange {
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    margin-top: 3px;
+  }
+  .entity-card-v1-numberchange code {
+    background: var(--bg-hover, rgba(0,0,0,0.05));
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0 5px;
+    font-size: 11px;
+  }
   .entity-card-v1-actions { display: flex; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
   .entity-card-v1-btn {
     font-size: 11.5px;

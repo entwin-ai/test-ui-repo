@@ -17,7 +17,7 @@ export async function GET() {
 
   const { data: pending, error } = await supa
     .from('entity')
-    .select('id, canonical_name, aliases, merge_candidate, merge_score, first_seen')
+    .select('id, canonical_name, aliases, merge_candidate, merge_score, first_seen, wa_phone, wa_prev_phone')
     .eq('user_email', auth.email)
     .eq('pending_review', true)
     .is('merged_into', null)
@@ -58,6 +58,11 @@ export async function GET() {
       score: r.merge_score != null ? Math.round(Number(r.merge_score) * 100) : null,
       firstSeen: r.first_seen,
       references: counts.get(r.id) || 0,
+      // Phase 6: for a WhatsApp number-change candidate, both numbers so the
+      // reviewer confirms a number change, not just a name (Read Me §6.3).
+      newPhone: r.wa_phone || null,
+      prevPhone: r.wa_prev_phone || null,
+      isNumberChange: !!r.wa_prev_phone,
     })),
   })
 }

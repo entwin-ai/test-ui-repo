@@ -13,7 +13,7 @@ import {
 import { ingestMessage } from './pipeline/ingest.js';
 import { appendRollup, hhmm } from './pipeline/ingest.js';
 import { classify } from './lib/classify.js';
-import { ingestWhatsappBackfill, ingestWhatsappDelta } from './pipeline/whatsapp.js';
+import { ingestWhatsappBackfill, ingestWhatsappDelta, reprocessEntityAsImportant } from './pipeline/whatsapp.js';
 import { captureWhatsapp } from './pipeline/whatsapp-capture.js';
 import { probeWhatsapp } from './pipeline/whatsapp-probe.js';
 import { getSlackSession } from './lib/redis-slack.js';
@@ -33,6 +33,7 @@ const CONCURRENCY = Math.max(1, parseInt(process.env.INGEST_CONCURRENCY || '6', 
 const ONLY_USER = process.env.ONLY_USER || null; // optional single-user run
 const ONLY_CARD = process.env.ONLY_CARD || null; // optional single-card run
 const ONLY_SENDER = process.env.ONLY_SENDER || null; // optional single-sender backfill
+const ONLY_IDENTITY_KEY = process.env.ONLY_IDENTITY_KEY || null; // WhatsApp move-backfill target
 
 // The app writes a sync_state row when a Gmail card connects. That's the
 // worker's enumeration source (Redis keys are hashed, so not enumerable back to
@@ -347,6 +348,33 @@ async function main() {
         console.log(`[${acct.user_email}/${acct.card_id}] ${MODE} done`);
       } catch (err) {
         console.error(`[${acct.user_email}/${acct.card_id}] wa account failed:`, err.message);
+      }
+    }
+    return;
+  }
+
+  // ---- WhatsApp Updates->Important move backfill (Phase 5, Read Me §8) -------
+  // Dispatched by PATCH /api/whatsapp/entities when the user drags an entity
+  // from Updates to Important. Re-expands that ONE entity's past Updates days
+  // (gists) into full facet-split Memory Notes. Scoped to one user + identity key.
+  if (MODE === 'whatsapp-move-backfill') {
+    if (!ONLY_IDENTITY_KEY) {
+      console.log('whatsapp-move-backfill requires ONLY_IDENTITY_KEY — skipping');
+      return;
+    }
+    const list = await accounts('whatsapp');
+    console.log(`MODE=whatsapp-move-backfill key=${ONLY_IDENTITY_KEY} accounts=${list.length}`);
+    for (const acct of list) {
+      try {
+        const llmConfig = await getLlmConfig(acct.user_email);
+        if (!llmConfig) {
+          console.log(`[${acct.user_email}/${acct.card_id}] no LLM key set — skipping`);
+          continue;
+        }
+        const provider = makeProvider(llmConfig);
+        await reprocessEntityAsImportant(acct, provider, ONLY_IDENTITY_KEY, runPool, CONCURRENCY);
+      } catch (err) {
+        console.error(`[${acct.user_email}/${acct.card_id}] whatsapp-move-backfill failed:`, err.message);
       }
     }
     return;

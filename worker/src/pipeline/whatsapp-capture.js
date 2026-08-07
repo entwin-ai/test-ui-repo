@@ -9,6 +9,7 @@ import pino from 'pino';
 import { admin } from '../lib/supabase.js';
 import { useRedisAuthState, hasCreds, clearAuthState } from '../lib/wa-auth-store.js';
 import { createNameRegistry } from '../lib/wa-names.js';
+import { createEntityRegistry } from '../lib/wa-entities.js';
 
 // BOUNDED WhatsApp capture — runs inside the hourly GitHub Actions job. Per user
 // it loads saved creds, opens a short-lived socket, drains WhatsApp's offline
@@ -50,8 +51,11 @@ function msgTsMs(m) {
   return raw ? raw * 1000 : 0;
 }
 
-// Build a ledger row, resolving names through the registry.
-function toRow(userEmail, m, names, selfName) {
+// Build a ledger row, resolving names through the registry. entityReg (when
+// provided) supplies the three-way type + community parentage the plain jid
+// can't (community vs plain group needs group metadata); we fall back to the
+// jid-derived person/group when metadata for this chat hasn't arrived yet.
+function toRow(userEmail, m, names, selfName, entityReg) {
   const text = extractText(m);
   if (!text) return null;
   const key = m.key;
@@ -62,6 +66,10 @@ function toRow(userEmail, m, names, selfName) {
   const chatJid = key.remoteJid;
   const isGroup = isJidGroup(chatJid);
   const senderJid = key.fromMe ? 'me' : key.participant || chatJid;
+
+  const meta = entityReg?.lookupByJid ? entityReg.lookupByJid(chatJid) : null;
+  const waEntityType = meta?.wa_entity_type || (isGroup ? 'group' : 'person');
+  const communityId = meta?.community_id || null;
 
   return {
     user_email: userEmail,
@@ -75,6 +83,8 @@ function toRow(userEmail, m, names, selfName) {
     msg_timestamp: new Date(tsMs).toISOString(),
     body: text,
     is_group: isGroup,
+    wa_entity_type: waEntityType,
+    community_id: communityId,
   };
 }
 
@@ -95,18 +105,41 @@ async function persistRows(rows, floorIso) {
     .from('whatsapp_message')
     .upsert(unique, { onConflict: 'user_email,wa_msg_id' });
 
-  // Resilience: if the schema cache doesn't yet know is_group (migration 0008
-  // not applied / not reloaded), strip it and retry once rather than zeroing the
-  // whole run. is_group backfills later via the migration.
-  if (error && /is_group/.test(error.message) && /schema cache|column/.test(error.message)) {
-    console.warn('whatsapp_message: is_group not in schema cache — retrying without it');
-    const stripped = unique.map(({ is_group, ...rest }) => rest);
+  // Resilience: if the schema cache doesn't yet know a newly-added column
+  // (migration 0008 is_group, or 0016 wa_entity_type/community_id — not applied
+  // / not reloaded), strip the offending columns and retry once rather than
+  // zeroing the whole run. They backfill later via the migration + reprocess.
+  if (error && /is_group|wa_entity_type|community_id/.test(error.message) &&
+      /schema cache|column/.test(error.message)) {
+    console.warn('whatsapp_message: new column not in schema cache — retrying without 0008/0016 columns');
+    const stripped = unique.map(({ is_group, wa_entity_type, community_id, ...rest }) => rest);
     ({ error } = await admin
       .from('whatsapp_message')
       .upsert(stripped, { onConflict: 'user_email,wa_msg_id' }));
   }
   if (error) throw new Error(`whatsapp_message upsert: ${error.message}`);
   return unique.length;
+}
+
+// Upsert the per-run entity metadata (Phase 1.2) into whatsapp_entity. Keyed on
+// (user_email, identity_key) so it's idempotent: each run refreshes the live
+// fields (muted/archived/member_count/is_admin) for every entity it observed.
+// Best-effort and isolated from message capture — a metadata upsert failure must
+// never fail the run or block message ingestion, so the caller wraps this in its
+// own try/catch and continues. Resilient to a stale schema cache the same way
+// persistRows() is (migration 0016 not yet reloaded).
+async function persistEntities(rows) {
+  if (!rows || rows.length === 0) return 0;
+  let { error } = await admin
+    .from('whatsapp_entity')
+    .upsert(rows, { onConflict: 'user_email,identity_key' });
+  if (error && /whatsapp_entity|wa_entity_type|identity_key/.test(error.message) &&
+      /schema cache|does not exist|column|relation/.test(error.message)) {
+    console.warn(`whatsapp_entity not in schema cache yet (migration 0016?) — skipping metadata upsert this run`);
+    return 0;
+  }
+  if (error) throw new Error(`whatsapp_entity upsert: ${error.message}`);
+  return rows.length;
 }
 
 export async function captureWhatsapp(acct) {
@@ -128,6 +161,8 @@ export async function captureWhatsapp(acct) {
 
   const { state, saveCreds, flush } = await useRedisAuthState(userEmail);
   const names = createNameRegistry();
+  const entityReg = createEntityRegistry();
+  entityReg.setSelf(state?.creds?.me?.id || null, state?.creds?.me?.lid || null);
 
   const buffer = [];
   let captured = 0;
@@ -158,7 +193,7 @@ export async function captureWhatsapp(acct) {
       for (const m of msgs) {
         names.ingestMessage(m);
         noteOldest(m);
-        const row = toRow(userEmail, m, names, selfName);
+        const row = toRow(userEmail, m, names, selfName, entityReg);
         if (row) buffer.push(row);
       }
       bumpQuiet();
@@ -233,12 +268,23 @@ export async function captureWhatsapp(acct) {
       }
       try { await flush(); } catch (e) { console.error(`[${userEmail}/wa] cred flush failed:`, e.message); }
       try { sock?.end(undefined); } catch {}
+
+      // Phase 1.2: persist per-entity metadata (whatsapp_entity). Best-effort and
+      // fully isolated — a failure here never affects message capture above.
+      let entitiesUpserted = 0;
+      try {
+        entitiesUpserted = await persistEntities(entityReg.toRows(userEmail, acct.card_id));
+      } catch (e) {
+        console.error(`[${userEmail}/wa] entity metadata upsert failed:`, e.message);
+      }
+
       const sizes = names._sizes();
       console.log(
         `[${userEmail}/wa] capture done (${reason}) — ${captured} rows, ` +
-        `${oldest.size} chats, names[contacts=${sizes.contacts},chats=${sizes.chats}]`
+        `${oldest.size} chats, ${entitiesUpserted} entities, ` +
+        `names[contacts=${sizes.contacts},chats=${sizes.chats}]`
       );
-      resolve({ captured });
+      resolve({ captured, entities: entitiesUpserted });
     };
 
     hardTimer = setTimeout(() => finish('ceiling'), drainCeiling);
@@ -266,13 +312,32 @@ export async function captureWhatsapp(acct) {
       sock.ev.on('messaging-history.set', ({ contacts, chats, messages }) => {
         names.ingestContacts(contacts || []);
         names.ingestChats(chats || []);
+        for (const c of contacts || []) entityReg.ingestContact(c);
+        for (const ch of chats || []) entityReg.ingestChat(ch);
         collect(messages || []);
       });
-      sock.ev.on('contacts.upsert', (contacts) => names.ingestContacts(contacts || []));
-      sock.ev.on('contacts.update', (contacts) => names.ingestContacts(contacts || []));
-      sock.ev.on('chats.upsert', (chats) => names.ingestChats(chats || []));
+      sock.ev.on('contacts.upsert', (contacts) => {
+        names.ingestContacts(contacts || []);
+        for (const c of contacts || []) entityReg.ingestContact(c);
+      });
+      sock.ev.on('contacts.update', (contacts) => {
+        names.ingestContacts(contacts || []);
+        for (const c of contacts || []) entityReg.ingestContact(c);
+      });
+      sock.ev.on('chats.upsert', (chats) => {
+        names.ingestChats(chats || []);
+        for (const ch of chats || []) entityReg.ingestChat(ch);
+      });
+      // chats.update carries the LIVE archived/muted flips (Read Me §4) — feed
+      // them so this run's whatsapp_entity row reflects current state.
+      sock.ev.on('chats.update', (updates) => {
+        for (const u of updates || []) entityReg.ingestChatUpdate(u);
+      });
       sock.ev.on('groups.upsert', (groups) => {
-        for (const g of groups || []) names.ingestGroupMetadata(g);
+        for (const g of groups || []) {
+          names.ingestGroupMetadata(g);
+          entityReg.ingestGroupMetadata(g);
+        }
       });
       sock.ev.on('messages.upsert', ({ messages }) => collect(messages || []));
 

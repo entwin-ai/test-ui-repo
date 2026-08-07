@@ -13,7 +13,7 @@ import { LOGO_DATA_URI } from './logo'
 import AnimaticsFlow from './animatics-flow'
 
 type ViewKey = 'chat' | 'connectors' | 'dashboard' | 'memory' | 'settings'
-type DashTab = 'overview' | 'kanban' | 'entities'
+type DashTab = 'overview' | 'kanban' | 'wa-kanban' | 'entities'
 type ListKey = 'marketing' | 'updates' | 'people'
 type ProviderKey = 'claude' | 'gemini' | 'openai' | 'neocloud' | 'onprem'
 
@@ -1397,7 +1397,163 @@ function KanbanPanel() {
   )
 }
 
-interface PendingEntity { id: string; name: string; aliases: string[]; candidateId: string | null; candidateName: string | null; score: number | null; references: number }
+interface WAEntity {
+  identityKey: string
+  type: 'person' | 'group' | 'community'
+  name: string
+  tier: 'updates' | 'important'
+  isNew: boolean
+  reason: string | null
+  isAdmin: boolean | null
+  muted: boolean | null
+  memberCount: number | null
+  isCommunitySubgroup: boolean
+}
+
+const WA_TIER_LABELS: Record<'updates' | 'important', string> = {
+  updates: 'Updates',
+  important: 'Important WhatsApp Entities',
+}
+
+// Move-effect notes shown when an entity is dragged (Read Me §8, two-bucket form).
+const WA_MOVE_RULES: Record<string, string> = {
+  'updates>important':
+    'Backfill: a full facet-split Memory Note will be created for every past day this entity was in Updates, dated to each day\u2019s original messages. This can take a while for a large or long-lived group.',
+  'important>updates':
+    'No deletion. Existing Memory Notes stand untouched. New days from this entity will log into the WhatsApp Updates Note instead (one-line gist).',
+}
+
+// The two-column WhatsApp Kanban (Read Me §7). Archived entities are the Ignore
+// tier and never appear here. Given community-subgroup volume, the board has a
+// search field and each column scrolls, unlike the shorter email board.
+function WhatsAppKanbanPanel() {
+  const [items, setItems] = useState<WAEntity[]>([])
+  const [loading, setLoading] = useState(true)
+  const [query, setQuery] = useState('')
+  const [moveNote, setMoveNote] = useState('')
+  const draggedKey = useRef<string | null>(null)
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/whatsapp/entities')
+      const data = await res.json().catch(() => ({ updates: [], important: [] }))
+      const merged: WAEntity[] = [...(data.updates || []), ...(data.important || [])]
+      setItems(merged)
+    } catch {
+      setItems([])
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { load() }, [])
+
+  const anyUnconfirmed = items.some((i) => i.isNew)
+
+  const drop = async (tier: 'updates' | 'important') => {
+    const key = draggedKey.current
+    draggedKey.current = null
+    if (!key) return
+    const ent = items.find((i) => i.identityKey === key)
+    if (!ent || ent.tier === tier) return
+    const ruleKey = `${ent.tier}>${tier}`
+    if (WA_MOVE_RULES[ruleKey]) setMoveNote(`${ent.name}: ${WA_MOVE_RULES[ruleKey]}`)
+    // optimistic move + confirm
+    setItems((prev) => prev.map((i) => (i.identityKey === key ? { ...i, tier, isNew: false } : i)))
+    try {
+      await fetch('/api/whatsapp/entities', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identityKey: key, tier }),
+      })
+    } catch { /* non-fatal; refetch on next load */ }
+  }
+
+  const confirmAll = async () => {
+    setItems((prev) => prev.map((i) => ({ ...i, isNew: false })))
+    try {
+      await fetch('/api/whatsapp/entities', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmAll: true }),
+      })
+    } catch { /* non-fatal */ }
+  }
+
+  const q = query.trim().toLowerCase()
+  const visible = q
+    ? items.filter((i) => i.name.toLowerCase().includes(q) || i.identityKey.toLowerCase().includes(q))
+    : items
+
+  return (
+    <div className="dash-panel active" id="dash-wa-kanban">
+      {anyUnconfirmed && (
+        <div className="kanban-banner" id="wa-kanban-banner">
+          <div className="kanban-banner-text">New and provisionally-sorted WhatsApp entities are highlighted. Drag any miscategorized entity to the right column, then confirm. Moving a group from Updates to Important re-expands its past days into full notes.</div>
+          <button className="kanban-confirm-btn" onClick={confirmAll}>Confirm classification</button>
+        </div>
+      )}
+      <div className="kanban-search-row">
+        <input
+          className="kanban-search"
+          type="text"
+          placeholder="Search WhatsApp entities..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+      </div>
+      {loading ? (
+        <div className="entity-empty">Loading WhatsApp entities...</div>
+      ) : items.length === 0 ? (
+        <div className="entity-empty">No WhatsApp entities classified yet. They appear here as WhatsApp is ingested. Archived chats are never shown.</div>
+      ) : (
+      <div className="kanban-board kanban-board-two" id="wa-kanban-board">
+        {(['updates', 'important'] as ('updates' | 'important')[]).map((tier) => {
+          const cards = visible.filter((i) => i.tier === tier)
+          return (
+            <div
+              className="kanban-column kanban-column-scroll"
+              key={tier}
+              onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('drag-over') }}
+              onDragLeave={(e) => e.currentTarget.classList.remove('drag-over')}
+              onDrop={(e) => { e.currentTarget.classList.remove('drag-over'); drop(tier) }}
+            >
+              <div className="kanban-column-header">
+                <span>{WA_TIER_LABELS[tier]}</span>
+                <span className="kanban-column-count">{cards.length}</span>
+              </div>
+              <div className="kanban-cards">
+                {cards.map((i) => (
+                  <div
+                    className={`kanban-card${i.isNew ? ' is-new' : ''}`}
+                    key={i.identityKey}
+                    draggable
+                    onDragStart={(e) => { draggedKey.current = i.identityKey; e.currentTarget.classList.add('dragging') }}
+                    onDragEnd={(e) => e.currentTarget.classList.remove('dragging')}
+                  >
+                    <div className="kanban-card-name">{i.name}</div>
+                    <div className="kanban-card-meta">
+                      <span className="kanban-tag">{i.type}</span>
+                      {i.isAdmin ? <span className="kanban-tag">admin</span> : null}
+                      {i.muted ? <span className="kanban-tag">muted</span> : null}
+                      {typeof i.memberCount === 'number' ? <span className="kanban-tag">{i.memberCount} members</span> : null}
+                      {i.isCommunitySubgroup ? <span className="kanban-tag">community</span> : null}
+                    </div>
+                    {i.isNew && <div className="kanban-card-new-tag">New</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+      )}
+      <div className={`kanban-move-note${moveNote ? ' show' : ''}`} id="wa-kanban-move-note">{moveNote}</div>
+    </div>
+  )
+}
+
+interface PendingEntity { id: string; name: string; aliases: string[]; candidateId: string | null; candidateName: string | null; score: number | null; references: number; newPhone?: string | null; prevPhone?: string | null; isNumberChange?: boolean }
 interface SearchEntity { id: string; name: string; aliases: string[]; type?: string }
 
 function EntitiesPanel({ entities, setEntities }: { entities: Entity[]; setEntities: React.Dispatch<React.SetStateAction<Entity[]>> }) {
@@ -1455,6 +1611,11 @@ function EntitiesPanel({ entities, setEntities }: { entities: Entity[]; setEntit
                 )}
               </div>
               <div className="entity-card-v1-meta">{ent.references} reference{ent.references === 1 ? '' : 's'}</div>
+              {ent.isNumberChange && (
+                <div className="entity-card-v1-numberchange">
+                  Possible WhatsApp number change: <code>{ent.prevPhone}</code> &rarr; <code>{ent.newPhone}</code>
+                </div>
+              )}
               {ent.aliases.length > 0 && <div className="entity-card-v1-aliases">Aliases seen: {ent.aliases.join(', ')}</div>}
               <div className="entity-card-v1-actions">
                 {ent.candidateId && (
@@ -1463,7 +1624,7 @@ function EntitiesPanel({ entities, setEntities }: { entities: Entity[]; setEntit
                     disabled={busy === ent.id}
                     onClick={() => act('/api/entities/merge', { sourceId: ent.id, targetId: ent.candidateId }, ent.id)}
                   >
-                    Merge into {ent.candidateName}
+                    {ent.isNumberChange ? 'Confirm same person' : `Merge into ${ent.candidateName}`}
                   </button>
                 )}
                 <button
@@ -1797,6 +1958,7 @@ function DashboardView({ connectedCount, total, entities, setEntities }: { conne
       <div className="subtab-bar">
         <button className={`subtab-btn${tab === 'overview' ? ' active' : ''}`} onClick={() => setTab('overview')}>Overview</button>
         <button className={`subtab-btn${tab === 'kanban' ? ' active' : ''}`} onClick={() => setTab('kanban')}>Sender Kanban</button>
+        <button className={`subtab-btn${tab === 'wa-kanban' ? ' active' : ''}`} onClick={() => setTab('wa-kanban')}>WhatsApp Kanban</button>
         <button className={`subtab-btn${tab === 'entities' ? ' active' : ''}`} onClick={() => setTab('entities')}>
           Entity Review{pendingCount > 0 && <span className="subtab-badge" id="entity-badge">{pendingCount}</span>}
         </button>
@@ -1804,6 +1966,7 @@ function DashboardView({ connectedCount, total, entities, setEntities }: { conne
       <div id="dashboard-body">
         {tab === 'overview' && <OverviewPanel connectedCount={connectedCount} total={total} alertVisible={alertVisible} dismissAlert={() => setAlertVisible(false)} />}
         {tab === 'kanban' && <KanbanPanel />}
+        {tab === 'wa-kanban' && <WhatsAppKanbanPanel />}
         {tab === 'entities' && <EntitiesPanel entities={entities} setEntities={setEntities} />}
       </div>
     </>
