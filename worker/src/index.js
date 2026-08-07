@@ -15,6 +15,7 @@ import { appendRollup, hhmm } from './pipeline/ingest.js';
 import { classify } from './lib/classify.js';
 import { ingestWhatsappBackfill, ingestWhatsappDelta } from './pipeline/whatsapp.js';
 import { captureWhatsapp } from './pipeline/whatsapp-capture.js';
+import { probeWhatsapp } from './pipeline/whatsapp-probe.js';
 import { getSlackSession } from './lib/redis-slack.js';
 import { captureSlack, ingestSlackBackfill, ingestSlackDelta } from './pipeline/slack.js';
 import { backfillEntities } from './entity-backfill.js';
@@ -22,6 +23,7 @@ import { runPool } from './lib/pool.js';
 import { deltaDue, markDeltaRan, backfillDaysFor } from './lib/schedule.js';
 
 // backfill | delta                    -> Gmail
+// whatsapp-probe                      -> WhatsApp Phase 0: read-only capability probe (no ingest, no LLM)
 // whatsapp-sync                       -> WhatsApp: capture (drain offline) + vectorize, one bounded run
 // whatsapp-backfill | whatsapp-delta  -> WhatsApp vectorize-only (advanced/manual)
 // slack-sync                          -> Slack: capture (pull last month) + vectorize, one bounded run
@@ -259,6 +261,28 @@ async function main() {
   if (MODE === 'entity-backfill') {
     console.log('MODE=entity-backfill (building entity layer from existing notes)');
     await backfillEntities();
+    return;
+  }
+
+  // ---- WhatsApp capability probe (Phase 0) ----------------------------------
+  // A VERIFICATION spike, not an ingestion path. For each linked account it
+  // opens a short-lived READ-ONLY socket and inspects only the metadata surface
+  // (group/community/mute/admin/member-count/archived + username durability),
+  // writing a machine-readable row to whatsapp_capability_probe. It reads NO
+  // message bodies, writes NO memory notes, and never touches sync_state — so
+  // it needs no LLM key and is safe to run against a live account any time.
+  // Its findings gate whether Phases 1/2/6 can be built as specified.
+  if (MODE === 'whatsapp-probe') {
+    const list = await accounts('whatsapp');
+    console.log(`MODE=whatsapp-probe whatsapp-accounts=${list.length}`);
+    for (const acct of list) {
+      try {
+        const { notPaired } = await probeWhatsapp(acct);
+        if (notPaired) continue; // needs one-time pairing first
+      } catch (err) {
+        console.error(`[${acct.user_email}/wa-probe] failed:`, err.message);
+      }
+    }
     return;
   }
 

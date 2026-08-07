@@ -5,7 +5,8 @@
   "private": true,
   "scripts": {
     "start": "node src/index.js",
-    "pair": "node src/pair-whatsapp.js"
+    "pair": "node src/pair-whatsapp.js",
+    "probe": "MODE=whatsapp-probe node src/index.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",

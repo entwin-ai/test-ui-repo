@@ -1,0 +1,58 @@
+name: whatsapp-probe
+
+# Phase 0 WhatsApp ingestion-layer CAPABILITY PROBE.
+#
+# This is a one-off VERIFICATION spike, NOT part of hourly ingestion — it is
+# manual-dispatch only (no cron). For each linked account it opens a short-lived
+# READ-ONLY Baileys socket and inspects only the metadata surface the ingestion
+# layer exposes (group/community/mute/self-admin/member-count/archived +
+# username durability), writing a machine-readable row to
+# whatsapp_capability_probe. It reads NO message bodies, writes NO memory notes,
+# and never touches sync_state — so it needs NO LLM key and no embedding config.
+#
+# Run this against an account that is in at least one GROUP and one COMMUNITY,
+# otherwise the group/community/admin findings come back UNCONFIRMED (the probe
+# says so in its warnings). Its results decide whether Phases 1/2/6 can be built
+# as specified in the WhatsApp Ingestion Read Me.
+on:
+  workflow_dispatch:
+    inputs:
+      user_email:
+        description: 'Scope to one user email (blank = all linked)'
+        required: false
+        default: ''
+
+concurrency:
+  # Never overlap a probe with a sync (or another probe) for the same scope — a
+  # second socket for the same device closes both.
+  group: wa-socket-${{ github.event.inputs.user_email || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  whatsapp-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ingestion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install
+        working-directory: worker
+        run: npm install --omit=dev
+      - name: Run WhatsApp capability probe (read-only)
+        working-directory: worker
+        env:
+          MODE: whatsapp-probe
+          ONLY_USER: ${{ github.event.inputs.user_email }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # WhatsApp device creds live in this Redis (same as the sync job).
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          ENTWIN_KEY_SECRET: ${{ secrets.ENTWIN_KEY_SECRET }}
+          # Optional tuning of the probe socket window (see whatsapp-probe.js).
+          WA_PROBE_MS: ${{ vars.WA_PROBE_MS }}
+          WA_PROBE_QUIET_MS: ${{ vars.WA_PROBE_QUIET_MS }}
+        run: npm start
