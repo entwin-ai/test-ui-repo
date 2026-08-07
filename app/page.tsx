@@ -2740,7 +2740,7 @@ function SettingsView({ entwinName, setEntwinName, onLlmConfigChange }: { entwin
                   type="password"
                   className="text-input"
                   id="api-key"
-                  placeholder={configured?.provider === provider ? '•••••••• (set — enter to replace)' : 'sk-ant-... / sk-... / AIza...'}
+                  placeholder={configured?.provider === provider ? '•••••••• (set — enter to replace)' : 'Paste your API key'}
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
                   autoComplete="off"

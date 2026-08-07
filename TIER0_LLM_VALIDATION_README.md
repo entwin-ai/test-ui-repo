@@ -8,9 +8,11 @@ Chat/Dashboard`) is now real. Three gaps closed:
 **New:** `lib/rag/validate-key.ts` — two layers, cheapest first:
 
 - `prefixCheck(provider, apiKey)` — offline shape check. Catches the most common
-  mistake (a Claude `sk-ant-…` key pasted into a Gemini/OpenAI setup, or vice
+  mistake (a Claude `sk-ant-…` key pasted into an OpenAI setup, or vice
   versa) with **no network call**. Correctly disambiguates the `sk-` overlap
-  between OpenAI and Anthropic.
+  between OpenAI and Anthropic. Gemini is intentionally excluded — Google API
+  keys have no reliable, stable prefix, so a prefix check there would falsely
+  reject valid keys; Gemini keys are validated by the real probe only.
 - `validateKey(provider, apiKey)` — a real, lightweight authenticated probe:
   Anthropic → 1-token `/v1/messages`; OpenAI → `GET /v1/models`; Gemini →
   `GET /v1beta/models`. This is the only thing that catches a key that has the

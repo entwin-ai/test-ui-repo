@@ -26,11 +26,15 @@ import type { LlmProvider } from './llm-keys'
 
 // ---- Layer 1: offline prefix / shape check ---------------------------------
 
-/** Expected key prefixes per hosted provider. */
-const PREFIX: Record<LlmProvider, RegExp> = {
+/**
+ * Expected key prefixes per hosted provider. Gemini is intentionally excluded:
+ * Google API keys have no reliable, stable prefix to validate against, so a
+ * prefix check there produces false rejections. Gemini keys are validated only
+ * by the real authenticated probe (Layer 2).
+ */
+const PREFIX: Partial<Record<LlmProvider, RegExp>> = {
   claude: /^sk-ant-/,
   openai: /^sk-/, // note: sk-ant- also starts with sk-, so check claude first
-  gemini: /^AIza/,
 }
 
 export interface PrefixResult {
@@ -51,20 +55,18 @@ export function prefixCheck(provider: LlmProvider, apiKey: string): PrefixResult
 
   // Disambiguate the sk- overlap: an Anthropic key (sk-ant-…) must not be
   // accepted as an OpenAI key, and an OpenAI key (sk-…, not sk-ant-) must not be
-  // accepted as a Claude key.
-  if (provider === 'claude' && !PREFIX.claude.test(key)) {
+  // accepted as a Claude key. Providers without a reliable prefix (Gemini) have
+  // no entry in PREFIX and are left to the real authenticated probe.
+  if (provider === 'claude' && !PREFIX.claude!.test(key)) {
     return { ok: false, reason: 'A Claude key should start with "sk-ant-".' }
   }
   if (provider === 'openai') {
-    if (!PREFIX.openai.test(key)) {
+    if (!PREFIX.openai!.test(key)) {
       return { ok: false, reason: 'An OpenAI key should start with "sk-".' }
     }
-    if (PREFIX.claude.test(key)) {
+    if (PREFIX.claude!.test(key)) {
       return { ok: false, reason: 'That looks like a Claude key (sk-ant-…), not an OpenAI key.' }
     }
-  }
-  if (provider === 'gemini' && !PREFIX.gemini.test(key)) {
-    return { ok: false, reason: 'A Gemini key should start with "AIza".' }
   }
   return { ok: true }
 }
