@@ -2972,6 +2972,11 @@ function AppShell() {
               : c,
           ),
         )
+        // Persist the durable connect flag so it survives a browser close /
+        // reopen. Without this, connector_state.connected stays false for the
+        // Gmail card and the grid would repaint "Connect" on the next load.
+        // Keyed by the card's connector slug (same as cardId).
+        persistConnectorState(cardId, { connected: true })
 
         try {
           const res = await fetch('/api/gmail/scan', {
@@ -3193,24 +3198,35 @@ function AppShell() {
               state: string
               connectedEmail: string | null
               scan: { inboxCount: number; sentCount: number } | null
+              storeConfigured?: boolean
             }
             if (cancelled) return
-            const connected = st.state === 'connected'
+            const statusConnected = st.state === 'connected'
             setConnectors((prev) =>
-              prev.map((c) =>
-                c.cardId === cardId
-                  ? {
-                      ...c,
-                      connected,
-                      connectedEmail: connected ? st.connectedEmail : null,
-                      // Restore prior counts; clear them if not connected.
-                      scan: connected && st.scan
-                        ? { inboxCount: st.scan.inboxCount, sentCount: st.scan.sentCount }
-                        : null,
-                      scanning: false,
-                    }
-                  : c,
-              ),
+              prev.map((c) => {
+                if (c.cardId !== cardId) return c
+                // Authoritative ONLY when the durable token store is configured:
+                // then `disconnected` truly means no token. When the store isn't
+                // configured, a `disconnected` reading may just be a lost
+                // in-memory session after a restart — in that case keep the
+                // persisted connect flag the connector-state hydrator painted,
+                // so a real connection survives a browser close / reopen.
+                const connected =
+                  statusConnected || (st.storeConfigured === false && c.connected)
+                return {
+                  ...c,
+                  connected,
+                  connectedEmail: connected ? st.connectedEmail ?? c.connectedEmail ?? null : null,
+                  // Restore prior counts; clear them if not connected.
+                  scan:
+                    connected && st.scan
+                      ? { inboxCount: st.scan.inboxCount, sentCount: st.scan.sentCount }
+                      : connected
+                      ? c.scan ?? null
+                      : null,
+                  scanning: false,
+                }
+              }),
             )
           } catch {
             /* ignore — connector-state hydrator already painted a best guess */

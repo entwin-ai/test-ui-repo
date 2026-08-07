@@ -544,6 +544,14 @@ export interface GmailStatus {
   state: GmailState
   connectedEmail: string | null
   scan: GmailScanResult | null
+  /**
+   * Whether the durable token store (Redis) is configured. When false, a
+   * `disconnected` state is NOT authoritative — the session may simply have been
+   * lost from this instance's memory across a restart — so the client should
+   * fall back to the persisted connector_state flag instead of downgrading the
+   * card. When true, `disconnected` means the token really isn't there.
+   */
+  storeConfigured: boolean
 }
 
 export async function status(userEmail: string, cardId: string): Promise<GmailStatus> {
@@ -552,6 +560,7 @@ export async function status(userEmail: string, cardId: string): Promise<GmailSt
     state: sess.state,
     connectedEmail: sess.connectedEmail ?? null,
     scan: sess.scan ?? null,
+    storeConfigured: REDIS_ENABLED,
   }
 }
 
