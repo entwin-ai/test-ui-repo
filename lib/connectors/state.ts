@@ -54,7 +54,9 @@ export const DEFAULT_SETTINGS: ConnectorSettings = {
 const BOUNDS = {
   pollHours: { min: 1, max: 24 },
   backfillDays: { min: 1, max: 100 },
-  totalWindowDays: { min: 365, max: 365 },
+  // The rolling window Entwin keeps indexed going forward. Now user-editable
+  // (previously frozen at 365). 30 days to 10 years.
+  totalWindowDays: { min: 30, max: 3650 },
 } as const
 
 function clampInt(n: unknown, min: number, max: number, fallback: number): number {
@@ -70,20 +72,25 @@ function clampInt(n: unknown, min: number, max: number, fallback: number): numbe
  */
 export function sanitizeSettings(input: unknown): ConnectorSettings {
   const src = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
+  const backfillDays = clampInt(
+    src.backfillDays,
+    BOUNDS.backfillDays.min,
+    BOUNDS.backfillDays.max,
+    DEFAULT_SETTINGS.backfillDays,
+  )
+  let totalWindowDays = clampInt(
+    src.totalWindowDays,
+    BOUNDS.totalWindowDays.min,
+    BOUNDS.totalWindowDays.max,
+    DEFAULT_SETTINGS.totalWindowDays,
+  )
+  // The rolling window can never be shorter than the one-time backfill — that
+  // would mean indexing less history than was initially pulled. Floor it.
+  if (totalWindowDays < backfillDays) totalWindowDays = backfillDays
   return {
     pollHours: clampInt(src.pollHours, BOUNDS.pollHours.min, BOUNDS.pollHours.max, DEFAULT_SETTINGS.pollHours),
-    backfillDays: clampInt(
-      src.backfillDays,
-      BOUNDS.backfillDays.min,
-      BOUNDS.backfillDays.max,
-      DEFAULT_SETTINGS.backfillDays,
-    ),
-    totalWindowDays: clampInt(
-      src.totalWindowDays,
-      BOUNDS.totalWindowDays.min,
-      BOUNDS.totalWindowDays.max,
-      DEFAULT_SETTINGS.totalWindowDays,
-    ),
+    backfillDays,
+    totalWindowDays,
   }
 }
 
@@ -91,6 +98,9 @@ export interface ConnectorStateRecord {
   connectorKey: ConnectorKey
   connected: boolean
   settings: ConnectorSettings
+  /** Last time this connector was actually read (on-demand or by the poll),
+   *  ISO string, or null if never. Backs the "Last read" line in the modal. */
+  lastReadAt: string | null
 }
 
 /** Every stored row for this user, keyed by connectorKey for easy lookup. */
@@ -99,7 +109,7 @@ export async function getAllConnectorState(
 ): Promise<Record<string, ConnectorStateRecord>> {
   const { data, error } = await getSupabaseAdmin()
     .from('connector_state')
-    .select('connector_key, connected, settings')
+    .select('connector_key, connected, settings, last_read_at')
     .eq('user_email', userEmail)
 
   if (error) throw new Error(error.message)
@@ -112,6 +122,7 @@ export async function getAllConnectorState(
       connectorKey: key,
       connected: !!row.connected,
       settings: sanitizeSettings(row.settings),
+      lastReadAt: (row.last_read_at as string) ?? null,
     }
   }
   return out
@@ -124,7 +135,7 @@ export async function getConnectorState(
 ): Promise<ConnectorStateRecord | null> {
   const { data, error } = await getSupabaseAdmin()
     .from('connector_state')
-    .select('connector_key, connected, settings')
+    .select('connector_key, connected, settings, last_read_at')
     .eq('user_email', userEmail)
     .eq('connector_key', connectorKey)
     .maybeSingle()
@@ -135,6 +146,7 @@ export async function getConnectorState(
     connectorKey,
     connected: !!data.connected,
     settings: sanitizeSettings(data.settings),
+    lastReadAt: (data.last_read_at as string) ?? null,
   }
 }
 
@@ -172,5 +184,34 @@ export async function upsertConnectorState(
     )
 
   if (error) throw new Error(error.message)
-  return { connectorKey, connected, settings }
+  return { connectorKey, connected, settings, lastReadAt: existing?.lastReadAt ?? null }
+}
+
+/**
+ * Record that this connector was just read (on-demand "Read Now", or the poll).
+ * Creates the row if it doesn't exist yet — reading a card the user never saved
+ * settings for still gets a timestamp. Returns the ISO timestamp written.
+ */
+export async function touchLastRead(
+  userEmail: string,
+  connectorKey: ConnectorKey,
+): Promise<string> {
+  const now = new Date().toISOString()
+  const existing = await getConnectorState(userEmail, connectorKey)
+  const { error } = await getSupabaseAdmin()
+    .from('connector_state')
+    .upsert(
+      {
+        user_email: userEmail,
+        connector_key: connectorKey,
+        // Preserve current toggle/settings when the row already exists; default
+        // for a brand-new row (reading implies the card is in use).
+        connected: existing?.connected ?? false,
+        settings: existing?.settings ?? DEFAULT_SETTINGS,
+        last_read_at: now,
+      },
+      { onConflict: 'user_email,connector_key' },
+    )
+  if (error) throw new Error(error.message)
+  return now
 }

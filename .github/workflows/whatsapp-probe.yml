@@ -1,4 +1,5 @@
 name: whatsapp-probe
+run-name: whatsapp-probe · entwin-user:${{ github.event.inputs.user_email || 'all' }}
 
 # Phase 0 WhatsApp ingestion-layer CAPABILITY PROBE.
 #

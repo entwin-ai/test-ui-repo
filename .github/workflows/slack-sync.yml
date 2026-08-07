@@ -1,4 +1,5 @@
 name: slack-sync
+run-name: slack-sync · entwin-user:${{ github.event.inputs.user_email || 'all' }}
 
 # Hourly delta ingestion for every connected Slack account. Same bounded job as
 # the backfill: for each account it re-captures anything new in the last month

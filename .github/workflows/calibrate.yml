@@ -1,4 +1,5 @@
 name: gmail-calibrate
+run-name: gmail-calibrate · entwin-user:${{ github.event.inputs.user_email || 'all' }}
 
 # 90-day onboarding CALIBRATION sample (Email Ingestion Read Me, Onboarding).
 # Dispatched by POST /api/gmail/ingest on first connect: classifies senders

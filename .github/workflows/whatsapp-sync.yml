@@ -1,4 +1,5 @@
 name: whatsapp-sync
+run-name: whatsapp-sync · entwin-user:${{ github.event.inputs.user_email || 'all' }}
 
 # Hourly BATCH ingestion for every linked WhatsApp account. Each run is a fully
 # bounded job (no socket held between runs): for each account it opens a

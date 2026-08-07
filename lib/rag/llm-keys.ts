@@ -8,11 +8,22 @@ import crypto from 'crypto'
  */
 
 export type LlmProvider = 'claude' | 'openai' | 'gemini'
+/** Self-hosted, OpenAI-compatible backends. They carry an endpoint URL and an
+ * optional key rather than a hosted-provider key. */
+export type SelfHostedProvider = 'neocloud' | 'onprem'
+export type AnyProvider = LlmProvider | SelfHostedProvider
 
 export interface LlmConfig {
-  provider: LlmProvider
+  provider: AnyProvider
   model: string
+  /** For hosted providers, the API key. For self-hosted, an optional bearer. */
   apiKey: string
+  /** Base URL for self-hosted (neocloud/onprem) OpenAI-compatible endpoints. */
+  endpoint?: string
+}
+
+export function isSelfHosted(p: string): p is SelfHostedProvider {
+  return p === 'neocloud' || p === 'onprem'
 }
 
 const REDIS_URL =
@@ -85,8 +96,8 @@ export async function getLlmConfig(userEmail: string): Promise<LlmConfig | null>
 /** Whether a key is set — safe to return to the client (no secret leaks). */
 export async function hasLlmConfig(
   userEmail: string,
-): Promise<{ configured: boolean; provider?: LlmProvider; model?: string }> {
+): Promise<{ configured: boolean; provider?: AnyProvider; model?: string; endpoint?: string }> {
   const cfg = await getLlmConfig(userEmail)
   if (!cfg) return { configured: false }
-  return { configured: true, provider: cfg.provider, model: cfg.model }
+  return { configured: true, provider: cfg.provider, model: cfg.model, endpoint: cfg.endpoint }
 }

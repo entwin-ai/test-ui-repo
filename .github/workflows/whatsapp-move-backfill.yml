@@ -1,4 +1,5 @@
 name: whatsapp-move-backfill
+run-name: whatsapp-move-backfill · entwin-user:${{ github.event.inputs.user_email || 'all' }}
 
 # Dispatched by PATCH /api/whatsapp/entities when the user drags an entity from
 # the Updates column to the Important column on the WhatsApp Kanban (Read Me §8).

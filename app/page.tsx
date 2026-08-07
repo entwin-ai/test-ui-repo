@@ -144,6 +144,9 @@ interface Connector {
   key: string
   // Per-user settings for this card, loaded on mount and saved from the modal.
   settings?: ConnectorSettings
+  // Last on-demand/poll read of this card (ISO), or null if never. Backs the
+  // "Last read" line in the settings modal.
+  lastReadAt?: string | null
   // True once a settings row for this card exists in the DB for this user.
   // The grid Connect button is enabled ONLY when this is true; the gear
   // (settings) button stays enabled so the user can create the row first.
@@ -180,6 +183,22 @@ const INITIAL_CONNECTORS: Connector[] = [
  * a "Save settings" click; either may be sent without disturbing the other.
  * Returns true on success so callers that need to confirm (the modal) can.
  */
+/** Compact "time ago" for the connector Last-read line. */
+function timeAgo(iso: string | null | undefined): string {
+  if (!iso) return 'Never'
+  const then = new Date(iso).getTime()
+  if (!Number.isFinite(then)) return 'Never'
+  const secs = Math.max(0, Math.floor((Date.now() - then) / 1000))
+  if (secs < 45) return 'just now'
+  const mins = Math.floor(secs / 60)
+  if (mins < 60) return `${mins} min${mins === 1 ? '' : 's'} ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs} hour${hrs === 1 ? '' : 's'} ago`
+  const days = Math.floor(hrs / 24)
+  if (days < 30) return `${days} day${days === 1 ? '' : 's'} ago`
+  return new Date(iso).toLocaleDateString()
+}
+
 async function persistConnectorState(
   connectorKey: string,
   patch: { connected?: boolean; settings?: ConnectorSettings },
@@ -248,18 +267,12 @@ const GoogleG = () => (
 /* ---------------- Login screen (real Google OAuth) ---------------- */
 
 function LoginScreen() {
-  const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
 
   const handleGoogle = () => {
     setBusy(true)
     // Real Google OAuth via NextAuth — redirects to accounts.google.com
     signIn('google', { callbackUrl: '/' })
-  }
-
-  const handleEmail = () => {
-    setNote("Email sign-in isn't wired up in this prototype — use Google to continue.")
-    setTimeout(() => setNote(''), 3000)
   }
 
   return (
@@ -277,10 +290,6 @@ function LoginScreen() {
           <GoogleG />
           <span>{busy ? 'Redirecting…' : 'Continue with Google'}</span>
         </button>
-
-        <div className="login-divider">or</div>
-        <button className="login-email-link" id="email-login-btn" onClick={handleEmail}>Continue with email</button>
-        <div className="login-note" id="login-note">{note}</div>
 
         <div className="login-footer">By continuing, you agree to Entwin&apos;s Terms and acknowledge the Privacy Policy.</div>
       </div>
@@ -968,6 +977,10 @@ function ConnectorsView({
             ),
           )
         }}
+        onReadNow={(lastReadAt) => {
+          const key = connectors[settingsIdx].key
+          setConnectors((prev) => prev.map((x) => (x.key === key ? { ...x, lastReadAt } : x)))
+        }}
       />
     )}
     </>
@@ -1085,6 +1098,7 @@ function ConnectorSettingsModal({
   onClose,
   onConnectChange,
   onSettingsSaved,
+  onReadNow,
 }: {
   connector: Connector
   onClose: () => void
@@ -1092,6 +1106,8 @@ function ConnectorSettingsModal({
   onConnectChange: (connected: boolean) => void
   // Reflect saved settings back into the parent's connector list.
   onSettingsSaved: (settings: ConnectorSettings) => void
+  // Reflect a successful on-demand read (last-read timestamp) back to the grid.
+  onReadNow?: (lastReadAt: string) => void
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1106,52 +1122,108 @@ function ConnectorSettingsModal({
       ? connector.wa?.state === 'connected'
       : !!connector.connected
 
-  // Uniform connect/disconnect state, local to the modal (every connector
-  // behaves identically in this build — see Engineering Considerations).
+  // Uniform connect/disconnect state, local to the modal.
   const [connected, setConnected] = useState(initiallyConnected)
   const [checking, setChecking] = useState(false)
   const [showDisclaimer, setShowDisclaimer] = useState(false)
-
-  // In this build there is no UI to flip this — a re-connect always resolves
-  // to "still active at source", so it flips straight back to Disconnect.
-  const sourceStillActive = true
+  const [connErr, setConnErr] = useState<string | null>(null)
 
   // Seed the steppers from this card's persisted per-user settings (falling
   // back to defaults for a card the user has never saved).
   const seed = connector.settings ?? DEFAULT_CONNECTOR_SETTINGS
   const [pollHours, setPollHours] = useState(seed.pollHours)
   const [backfillDays, setBackfillDays] = useState(seed.backfillDays)
-  const totalWindowDays = seed.totalWindowDays // read-only for now
+  const [totalWindowDays, setTotalWindowDays] = useState(seed.totalWindowDays)
   const [saving, setSaving] = useState(false)
 
-  const handleConnectToggle = () => {
+  // On-demand read state.
+  const [lastReadAt, setLastReadAt] = useState<string | null>(connector.lastReadAt ?? null)
+  const [reading, setReading] = useState(false)
+  const [readErr, setReadErr] = useState<string | null>(null)
+
+  const handleConnectToggle = async () => {
+    setConnErr(null)
     if (connected) {
-      // Disconnect must happen at the source.
-      window.alert(
-        `To disconnect ${connector.name}, you’ll need to remove Entwin from ${sourceSettingsLabel(connector)}. ` +
-          `Revoking access there stops all future ingestion.`,
-      )
-      setConnected(false)
-      setShowDisclaimer(true)
-      // Persist + propagate the disconnect so the grid card and the DB agree.
-      onConnectChange(false)
+      // Real disconnect: revoke at source (Gmail/Slack token, WhatsApp link) and
+      // stop future syncs. Backend-less cards just persist the toggle.
+      setChecking(true)
+      try {
+        const res = await fetch('/api/connectors/disconnect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ connectorKey: connector.key }),
+        })
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}))
+          throw new Error(d.error || `Disconnect failed (${res.status})`)
+        }
+        setConnected(false)
+        setShowDisclaimer(true)
+        onConnectChange(false)
+      } catch (e) {
+        setConnErr((e as Error).message)
+      } finally {
+        setChecking(false)
+      }
       return
     }
-    // Connect → brief "Checking…" then resolve.
+    // Connect: re-check whether access at the source is genuinely live. For a
+    // backend-owned card this is the real session/link state; for a backend-less
+    // card the persisted toggle is the only truth, so a click simply enables it.
     setChecking(true)
-    window.setTimeout(() => {
-      setChecking(false)
-      if (sourceStillActive) {
-        // Access at the source is still live — flip straight back.
-        setConnected(true)
-        setShowDisclaimer(false)
+    try {
+      const res = await fetch('/api/connectors/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connectorKey: connector.key }),
+      })
+      const d = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(d.error || `Status check failed (${res.status})`)
+      if (d.backendOwned && !d.connected) {
+        // The source revoked access (or was never linked). Don't fake a connect;
+        // tell the user to reconnect at the source.
+        setConnErr(
+          `Entwin isn't linked to ${sourceDisplayName(connector)} anymore. Reconnect it from the ${connector.name} card on the Connectors grid.`,
+        )
+        setConnected(false)
+        onConnectChange(false)
       } else {
-        // Genuinely new connection (unreachable in this build).
         setConnected(true)
         setShowDisclaimer(false)
+        onConnectChange(true)
       }
-      onConnectChange(true)
-    }, 700)
+    } catch (e) {
+      setConnErr((e as Error).message)
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  // "Read Now": trigger a real on-demand read (Gmail/Slack scan, WhatsApp sync)
+  // for backend-owned cards, and record the read timestamp in every case.
+  const handleReadNow = async () => {
+    setReadErr(null)
+    setReading(true)
+    try {
+      const res = await fetch('/api/connectors/read', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connectorKey: connector.key }),
+      })
+      const d = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(d.error || `Read failed (${res.status})`)
+      if (d.lastReadAt) {
+        setLastReadAt(d.lastReadAt)
+        onReadNow?.(d.lastReadAt)
+      }
+      if (d.read && d.read.attempted && !d.read.ok) {
+        setReadErr(d.read.detail || 'The read attempt reported a problem.')
+      }
+    } catch (e) {
+      setReadErr((e as Error).message)
+    } finally {
+      setReading(false)
+    }
   }
 
   // Persist this card's settings for the current user, then close.
@@ -1201,6 +1273,12 @@ function ConnectorSettingsModal({
             </button>
           </div>
 
+          {connErr && (
+            <div className="conn-disclaimer" role="alert" style={{ color: '#c62828' }}>
+              {connErr}
+            </div>
+          )}
+
           {showDisclaimer && !connected && (
             <div className="conn-disclaimer" role="note">
               Entwin has stopped reading from {sourceDisplayName(connector)} on your device. To fully revoke access,
@@ -1212,10 +1290,18 @@ function ConnectorSettingsModal({
           <div className="conn-field-card">
             <div className="conn-field-main">
               <div className="conn-field-title">On-demand check</div>
-              <div className="conn-field-sub">Last read: Never</div>
+              <div className="conn-field-sub">
+                Last read: {timeAgo(lastReadAt)}
+                {readErr && <span style={{ color: '#c62828' }}> · {readErr}</span>}
+              </div>
             </div>
-            <button type="button" className="conn-secondary-btn">
-              Read Now
+            <button
+              type="button"
+              className="conn-secondary-btn"
+              onClick={handleReadNow}
+              disabled={reading}
+            >
+              {reading ? 'Reading…' : 'Read Now'}
             </button>
           </div>
 
@@ -1241,7 +1327,8 @@ function ConnectorSettingsModal({
             <div className="conn-field-heading">Ingestion window</div>
             <div className="conn-field-desc">
               Controls how far back this {sourceDisplayName(connector)} is read. The initial ingestion is a one-time
-              backfill; the total ingestion window is the rolling range Entwin keeps indexed going forward.
+              backfill; the total ingestion window is the rolling range Entwin keeps indexed going forward — anything
+              older is pruned on the next sync. The window can&apos;t be shorter than the initial backfill.
             </div>
             <div className="conn-field-inline">
               <span className="conn-field-label">Initial ingestion (one-time backfill)</span>
@@ -1249,14 +1336,25 @@ function ConnectorSettingsModal({
                 value={backfillDays}
                 min={1}
                 max={100}
-                onChange={setBackfillDays}
+                onChange={(v) => {
+                  setBackfillDays(v)
+                  // The rolling window can't be shorter than the backfill.
+                  setTotalWindowDays((w) => (w < v ? v : w))
+                }}
                 suffix="days"
                 ariaLabel="Initial ingestion backfill in days"
               />
             </div>
             <div className="conn-field-inline">
               <span className="conn-field-label">Total ingestion window</span>
-              <IntegerStepper value={totalWindowDays} min={365} max={365} readOnly suffix="days" ariaLabel="Total ingestion window in days" />
+              <IntegerStepper
+                value={totalWindowDays}
+                min={Math.max(30, backfillDays)}
+                max={3650}
+                onChange={setTotalWindowDays}
+                suffix="days"
+                ariaLabel="Total ingestion window in days"
+              />
             </div>
           </div>
         </div>
@@ -1784,7 +1882,16 @@ function NewReviewPanel({ onChanged }: { onChanged: () => void }) {
   )
 }
 
-interface Usage { inputTokens: number; outputTokens: number; calls: number; byKind: Record<string, { calls: number; input: number; output: number }> }
+interface Usage {
+  inputTokens: number
+  outputTokens: number
+  calls: number
+  byKind: Record<string, { calls: number; input: number; output: number }>
+  notesIndexed?: number | null
+  preferencesLearned?: number | null
+  ingestion7d?: { ignore: number | null; storage: number | null; memoryWorthy: number | null }
+  entitiesThisWeek?: number | null
+}
 
 // Two-entity display for a Memory Note (v5 §7). Shows, per resolved reference,
 // the entity resolved AT INGESTION vs the entity that owns it NOW. They agree in
@@ -1851,14 +1958,14 @@ function OverviewPanel({ connectedCount, total, alertVisible, dismissAlert }: { 
           <div className="stat-sub">Live from Connectors.</div>
         </div>
         <div className="stat-card">
-          <div className="stat-value">0</div>
+          <div className="stat-value">{usage && usage.notesIndexed != null ? fmt(usage.notesIndexed) : '—'}</div>
           <div className="stat-label">Notes indexed</div>
-          <div className="stat-sub">Placeholder — future ingestion metric.</div>
+          <div className="stat-sub">Memory Notes written from your sources.</div>
         </div>
         <div className="stat-card">
-          <div className="stat-value">0</div>
+          <div className="stat-value">{usage && usage.preferencesLearned != null ? fmt(usage.preferencesLearned) : '—'}</div>
           <div className="stat-label">Preferences learned</div>
-          <div className="stat-sub">Placeholder — future personalization metric.</div>
+          <div className="stat-sub">People &amp; organizations your twin recognizes.</div>
         </div>
       </div>
 
@@ -1877,17 +1984,17 @@ function OverviewPanel({ connectedCount, total, alertVisible, dismissAlert }: { 
       <div className="stat-grid">
         <div className="stat-card">
           <div className="stat-label">Ignore tier</div>
-          <div className="stat-value">184</div>
+          <div className="stat-value">{usage && usage.ingestion7d?.ignore != null ? fmt(usage.ingestion7d.ignore) : '—'}</div>
           <div className="stat-sub">Marketing list senders, logged to the Ignored Daily Note</div>
         </div>
         <div className="stat-card">
           <div className="stat-label">Storage tier</div>
-          <div className="stat-value">42</div>
+          <div className="stat-value">{usage && usage.ingestion7d?.storage != null ? fmt(usage.ingestion7d.storage) : '—'}</div>
           <div className="stat-sub">Updates list senders (banks, social, transactions)</div>
         </div>
         <div className="stat-card">
           <div className="stat-label">Memory-worthy</div>
-          <div className="stat-value">67</div>
+          <div className="stat-value">{usage && usage.ingestion7d?.memoryWorthy != null ? fmt(usage.ingestion7d.memoryWorthy) : '—'}</div>
           <div className="stat-sub">People list senders, full Memory Notes written</div>
         </div>
       </div>
@@ -1919,18 +2026,18 @@ function OverviewPanel({ connectedCount, total, alertVisible, dismissAlert }: { 
       <div className="stat-grid">
         <div className="stat-card">
           <div className="stat-label">New entity files</div>
-          <div className="stat-value">12</div>
-          <div className="stat-sub">Created from a clean, no-match resolution</div>
+          <div className="stat-value">{usage && usage.entitiesThisWeek != null ? fmt(usage.entitiesThisWeek) : '—'}</div>
+          <div className="stat-sub">Canonical entities created in the last 7 days</div>
         </div>
         <div className="stat-card">
-          <div className="stat-label">Appended to existing</div>
-          <div className="stat-value">34</div>
-          <div className="stat-sub">Memory Note References added to a known Entity file</div>
+          <div className="stat-label">Total entities</div>
+          <div className="stat-value">{usage && usage.preferencesLearned != null ? fmt(usage.preferencesLearned) : '—'}</div>
+          <div className="stat-sub">All people &amp; organizations your twin knows</div>
         </div>
         <div className="stat-card">
-          <div className="stat-label">Open items</div>
-          <div className="stat-value">7</div>
-          <div className="stat-sub">Memory Notes whose action still includes await or decision</div>
+          <div className="stat-label">Notes indexed</div>
+          <div className="stat-value">{usage && usage.notesIndexed != null ? fmt(usage.notesIndexed) : '—'}</div>
+          <div className="stat-sub">Total Memory Notes across all sources</div>
         </div>
       </div>
     </div>
@@ -2361,11 +2468,20 @@ function SettingsView({ entwinName, setEntwinName, onLlmConfigChange }: { entwin
   const [menuOpen, setMenuOpen] = useState(false)
   const [saved, setSaved] = useState(false)
   const [apiKey, setApiKey] = useState('')
-  const [configured, setConfigured] = useState<{ provider?: string; model?: string } | null>(null)
+  const [endpoint, setEndpoint] = useState('')
+  const [configured, setConfigured] = useState<{ provider?: string; model?: string; endpoint?: string } | null>(null)
   const [saveErr, setSaveErr] = useState('')
   const [saving, setSaving] = useState(false)
   const [killing, setKilling] = useState(false)
   const [killErr, setKillErr] = useState('')
+  // Tier-0 key test: null = untested, 'testing' = in flight, otherwise the
+  // result. `passed` gates the "skip re-validation on save" optimization.
+  const [testState, setTestState] = useState<'idle' | 'testing'>('idle')
+  const [testResult, setTestResult] = useState<{ ok: boolean; reason: string; note?: string } | null>(null)
+  // Entwin name save state (naming is required before Save is enabled).
+  const [nameSaving, setNameSaving] = useState(false)
+  const [nameSaved, setNameSaved] = useState(false)
+  const [nameErr, setNameErr] = useState('')
   const boxRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -2382,14 +2498,21 @@ function SettingsView({ entwinName, setEntwinName, onLlmConfigChange }: { entwin
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (d?.configured) {
-          setConfigured({ provider: d.provider, model: d.model })
+          setConfigured({ provider: d.provider, model: d.model, endpoint: d.endpoint })
           if (d.provider) setProvider(d.provider as ProviderKey)
+          if (d.endpoint) setEndpoint(d.endpoint)
         }
       })
       .catch(() => {})
   }, [])
 
   const isSelfHosted = !!SELF_HOSTED[provider]
+
+  // A stale test result must never linger next to a key/provider/endpoint that
+  // has since changed — clear it the moment any input the test depended on moves.
+  useEffect(() => {
+    setTestResult(null)
+  }, [apiKey, provider, endpoint])
 
   const backends: { value: ProviderKey; name: string; desc?: string }[] = [
     { value: 'claude', name: 'Claude API' },
@@ -2399,29 +2522,77 @@ function SettingsView({ entwinName, setEntwinName, onLlmConfigChange }: { entwin
     { value: 'onprem', name: 'On-prem LLM', desc: 'Self-hosted LLM, runs on your own hardware.' },
   ]
 
-  async function handleSave() {
+  // Run a real validation probe against the provider WITHOUT saving. Catches an
+  // expired / revoked / wrong-provider / wrong-scope key before the user commits.
+  async function handleTest() {
     setSaveErr('')
-    // Self-hosted providers aren't wired to the ingestion backend yet.
+    setTestResult(null)
     if (isSelfHosted) {
-      setSaveErr('Self-hosted providers are not yet supported for ingestion. Choose Claude, Gemini, or OpenAI.')
+      if (!endpoint.trim()) {
+        setTestResult({ ok: false, reason: 'Enter the endpoint URL to test.' })
+        return
+      }
+    } else if (!apiKey || apiKey.length < 8) {
+      setTestResult({ ok: false, reason: 'Enter an API key to test.' })
       return
     }
-    if (!apiKey || apiKey.length < 8) {
+    setTestState('testing')
+    try {
+      const res = await fetch('/api/settings/llm/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider,
+          apiKey: isSelfHosted ? apiKey || undefined : apiKey,
+          endpoint: isSelfHosted ? endpoint : undefined,
+        }),
+      })
+      const data = await res.json().catch(() => ({}))
+      setTestResult({
+        ok: !!data.ok,
+        reason: data.reason || (res.ok ? 'Key verified.' : `Test failed (${res.status})`),
+        note: data.embeddingsReady === false ? data.embeddingsNote : undefined,
+      })
+    } catch (e) {
+      setTestResult({ ok: false, reason: `Could not run the test: ${(e as Error).message}` })
+    } finally {
+      setTestState('idle')
+    }
+  }
+
+  async function handleSave() {
+    setSaveErr('')
+    if (isSelfHosted) {
+      if (!endpoint.trim()) {
+        setSaveErr('Enter the endpoint URL for the self-hosted model.')
+        return
+      }
+    } else if (!apiKey || apiKey.length < 8) {
       setSaveErr('Enter a valid API key.')
       return
     }
     setSaving(true)
     try {
+      // If the user already ran Test and it passed for exactly these inputs, the
+      // server can skip its own re-probe (the offline prefix guard still runs).
+      const skipValidation = testResult?.ok === true
       const res = await fetch('/api/settings/llm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider, model: selectedModel[provider], apiKey }),
+        body: JSON.stringify({
+          provider,
+          model: selectedModel[provider],
+          apiKey,
+          endpoint: isSelfHosted ? endpoint : undefined,
+          skipValidation,
+        }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.error || `Save failed (${res.status})`)
       setSaved(true)
-      setConfigured({ provider, model: selectedModel[provider] })
+      setConfigured({ provider, model: selectedModel[provider], endpoint: isSelfHosted ? endpoint : undefined })
       setApiKey('') // clear from memory after save; key is write-only
+      setTestResult(null)
       onLlmConfigChange?.() // refresh the top-right model label app-wide
       setTimeout(() => setSaved(false), 1800)
     } catch (e) {
@@ -2431,10 +2602,38 @@ function SettingsView({ entwinName, setEntwinName, onLlmConfigChange }: { entwin
     }
   }
 
+  // Persist the Entwin name. Naming is required — Save is disabled until the
+  // field has a value, and the server rejects an empty name as a backstop.
+  async function handleSaveName() {
+    setNameErr('')
+    const clean = entwinName.trim()
+    if (!clean) {
+      setNameErr('Please name your Entwin first.')
+      return
+    }
+    setNameSaving(true)
+    try {
+      const res = await fetch('/api/settings/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entwinName: clean }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || `Save failed (${res.status})`)
+      setEntwinName(data.entwinName || clean)
+      setNameSaved(true)
+      setTimeout(() => setNameSaved(false), 1800)
+    } catch (e) {
+      setNameErr((e as Error).message)
+    } finally {
+      setNameSaving(false)
+    }
+  }
+
   async function handleKillTwin() {
     // Double confirmation for an irreversible, total deletion.
     const ok = window.confirm(
-      'Kill My Twin will permanently delete your digital twin and all ingested data. This cannot be undone. Continue?',
+      'Kill My Twin will permanently delete your entangled twin and all ingested data. This cannot be undone. Continue?',
     )
     if (!ok) return
 
@@ -2467,9 +2666,30 @@ function SettingsView({ entwinName, setEntwinName, onLlmConfigChange }: { entwin
       <div id="settings-body">
         <div className="settings-section">
           <div className="settings-label">Entwin identity</div>
-          <div className="settings-help">Give your digital twin a name. It&apos;s used across the app, like in &quot;Memory&quot;.</div>
+          <div className="settings-help">Give your entangled twin a name. It&apos;s used across the app, like in &quot;Memory&quot;.</div>
           <label className="field-label" htmlFor="entwin-name-input">Name your Entwin</label>
-          <input type="text" className="text-input" id="entwin-name-input" placeholder="Entwin" value={entwinName} onChange={(e) => setEntwinName(e.target.value)} />
+          <div className="key-test-row">
+            <input
+              type="text"
+              className="text-input"
+              id="entwin-name-input"
+              placeholder="Entwin"
+              value={entwinName}
+              onChange={(e) => setEntwinName(e.target.value)}
+            />
+            <button
+              type="button"
+              className="test-btn"
+              onClick={handleSaveName}
+              disabled={nameSaving || !entwinName.trim()}
+            >
+              {nameSaving ? 'Saving…' : 'Save name'}
+            </button>
+          </div>
+          <div>
+            <span className={`save-confirm${nameSaved ? ' show' : ''}`}>Saved</span>
+            {nameErr && <span className="save-confirm show" style={{ color: '#e53935' }}>{nameErr}</span>}
+          </div>
         </div>
 
         <div className="settings-section">
@@ -2515,21 +2735,69 @@ function SettingsView({ entwinName, setEntwinName, onLlmConfigChange }: { entwin
           {!isSelfHosted && (
             <div id="api-key-field">
               <label className="field-label" htmlFor="api-key">API key</label>
+              <div className="key-test-row">
+                <input
+                  type="password"
+                  className="text-input"
+                  id="api-key"
+                  placeholder={configured?.provider === provider ? '•••••••• (set — enter to replace)' : 'sk-ant-... / sk-... / AIza...'}
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  autoComplete="off"
+                />
+                <button
+                  type="button"
+                  className="test-btn"
+                  onClick={handleTest}
+                  disabled={testState === 'testing' || apiKey.length < 8}
+                >
+                  {testState === 'testing' ? 'Testing…' : 'Test'}
+                </button>
+              </div>
+            </div>
+          )}
+          {isSelfHosted && (
+            <div id="endpoint-field">
+              <label className="field-label" htmlFor="endpoint-input">{provider === 'neocloud' ? 'Endpoint URL' : 'Host address'}</label>
+              <div className="key-test-row">
+                <input
+                  type="text"
+                  className="text-input"
+                  id="endpoint-input"
+                  placeholder={provider === 'neocloud' ? 'https://your-neocloud-instance.example.com' : 'http://localhost:11434/v1'}
+                  value={endpoint}
+                  onChange={(e) => setEndpoint(e.target.value)}
+                  autoComplete="off"
+                />
+                <button
+                  type="button"
+                  className="test-btn"
+                  onClick={handleTest}
+                  disabled={testState === 'testing' || !endpoint.trim()}
+                >
+                  {testState === 'testing' ? 'Testing…' : 'Test'}
+                </button>
+              </div>
+              <label className="field-label" htmlFor="endpoint-key" style={{ marginTop: 10 }}>API key (optional)</label>
               <input
                 type="password"
                 className="text-input"
-                id="api-key"
-                placeholder={configured?.provider === provider ? '•••••••• (set — enter to replace)' : 'sk-ant-... / sk-... / AIza...'}
+                id="endpoint-key"
+                placeholder="Leave blank if the endpoint needs no key"
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
                 autoComplete="off"
               />
             </div>
           )}
-          {isSelfHosted && (
-            <div id="endpoint-field">
-              <label className="field-label" htmlFor="endpoint-input">{provider === 'neocloud' ? 'Endpoint URL' : 'Host address'}</label>
-              <input type="text" className="text-input" id="endpoint-input" placeholder={provider === 'neocloud' ? 'https://your-neocloud-instance.example.com' : 'localhost:11434'} />
+
+          {testResult && (
+            <div className={`key-test-result ${testResult.ok ? 'ok' : 'fail'}`} role="status">
+              <span className="key-test-icon">{testResult.ok ? '✓' : '✕'}</span>
+              <span>
+                {testResult.reason}
+                {testResult.note && <div className="key-test-note">{testResult.note}</div>}
+              </span>
             </div>
           )}
 
@@ -2595,6 +2863,21 @@ function AppShell() {
   const [entities, setEntities] = useState<Entity[]>(INITIAL_ENTITIES)
   const [entwinName, setEntwinName] = useState('')
 
+  // Load the persisted Entwin name (survives reload / device switch). Falls back
+  // to empty when never set, which the Settings tab surfaces as a required field.
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/settings/profile')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d?.entwinName) setEntwinName(d.entwinName)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const connectedCount = connectors.filter((c) => c.connected).length
 
   // Load the user's LLM config for the top-right label. Kept in a callback so
@@ -2639,7 +2922,7 @@ function AppShell() {
         const res = await fetch('/api/connectors/state')
         if (!res.ok) return
         const { states } = (await res.json()) as {
-          states: Record<string, { connected: boolean; settings: ConnectorSettings }>
+          states: Record<string, { connected: boolean; settings: ConnectorSettings; lastReadAt?: string | null }>
         }
         if (cancelled || !states) return
         setConnectors((prev) =>
@@ -2653,6 +2936,7 @@ function AppShell() {
               // fast paint; their status effects reconcile it moments later.
               connected: saved.connected,
               settings: saved.settings,
+              lastReadAt: saved.lastReadAt ?? null,
               // A row exists for this card → its grid Connect button is enabled.
               settingsPersisted: true,
             }
@@ -3073,7 +3357,13 @@ function AppShell() {
         {/* CHAT */}
         <div className={`view${view === 'chat' ? ' active' : ''}`} id="view-chat">
           <div className="view-header chat-header">
-            <div>Chat<div className="sub">Local placeholder — no model connected yet</div></div>
+            <div>Chat<div className="sub">{
+              llmConfigured === null
+                ? 'Checking model…'
+                : llmConfigured
+                ? `Answering from your vault${currentModel ? ` · ${currentModel}` : ''}`
+                : 'No model connected — set an API key in Settings'
+            }</div></div>
           </div>
           {view === 'chat' && <ChatView currentModel={currentModel} resetKey={chatResetKey} />}
         </div>

@@ -1,4 +1,5 @@
 name: slack-backfill
+run-name: slack-backfill · entwin-user:${{ github.event.inputs.user_email || 'all' }}
 
 # Dispatched by POST /api/slack/ingest right after a Slack card connects.
 # Runs the full capture + vectorize pass (last 1 month) for the given account.

@@ -163,23 +163,68 @@ const gemini = {
   },
 };
 
-const ADAPTERS = { claude, openai, gemini };
+// ---- SELF-HOSTED (neocloud / onprem; OpenAI-compatible) --------------------
+// Both speak the OpenAI wire format at a user-supplied base URL. The bearer key
+// is optional (on-prem deployments are often unauthenticated). `endpoint` is
+// bound per-call by makeProvider below, not read from a fixed host.
+function selfHostedBase(endpoint) {
+  const base = String(endpoint || '').trim().replace(/\/+$/, '');
+  if (!base) throw new Error('Self-hosted provider has no endpoint URL configured.');
+  return base;
+}
+const selfHosted = {
+  async chatJSON({ apiKey, endpoint, model, system, user, maxTokens }) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    const json = await apiFetch('self-hosted', `${selfHostedBase(endpoint)}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      }),
+    });
+    return {
+      text: stripJson(json.choices?.[0]?.message?.content ?? ''),
+      usage: { input_tokens: json.usage?.prompt_tokens, output_tokens: json.usage?.completion_tokens },
+    };
+  },
+  async embedBatch({ apiKey, endpoint, texts }) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    const model = process.env.SELF_HOSTED_EMBED_MODEL || 'text-embedding-3-small';
+    const json = await apiFetch('self-hosted-embed', `${selfHostedBase(endpoint)}/embeddings`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ model, input: texts }),
+    });
+    return (json.data || []).map((e) => normalizeDim(e.embedding));
+  },
+};
+
+const ADAPTERS = { claude, openai, gemini, neocloud: selfHosted, onprem: selfHosted };
+const SELF_HOSTED_PROVIDERS = new Set(['neocloud', 'onprem']);
 
 // Public factory: returns bound, retry-wrapped chat + batch-embed callables.
 export function makeProvider(config) {
-  const { provider, model, apiKey } = config;
+  const { provider, model, apiKey, endpoint } = config;
   const adapter = ADAPTERS[provider];
   if (!adapter) throw new Error(`unsupported provider: ${provider}`);
-  const chatModel = resolveChatModel(provider, model);
+  // Self-hosted models pass through verbatim (no hosted label→id map).
+  const chatModel = SELF_HOSTED_PROVIDERS.has(provider) ? model : resolveChatModel(provider, model);
   return {
     provider,
     model: chatModel,
     chatJSON: (args) =>
-      withRetry(() => adapter.chatJSON({ apiKey, model: chatModel, ...args }), { label: `${provider}.chat` }),
+      withRetry(() => adapter.chatJSON({ apiKey, endpoint, model: chatModel, ...args }), { label: `${provider}.chat` }),
     embedBatch: (texts) =>
-      withRetry(() => adapter.embedBatch({ apiKey, texts }), { label: `${provider}.embed` }),
+      withRetry(() => adapter.embedBatch({ apiKey, endpoint, texts }), { label: `${provider}.embed` }),
     embed: async (text) => {
-      const [v] = await withRetry(() => adapter.embedBatch({ apiKey, texts: [text] }), {
+      const [v] = await withRetry(() => adapter.embedBatch({ apiKey, endpoint, texts: [text] }), {
         label: `${provider}.embed`,
       });
       return v;

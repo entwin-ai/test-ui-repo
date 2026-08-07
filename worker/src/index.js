@@ -21,6 +21,7 @@ import { captureSlack, ingestSlackBackfill, ingestSlackDelta } from './pipeline/
 import { backfillEntities } from './entity-backfill.js';
 import { runPool } from './lib/pool.js';
 import { deltaDue, markDeltaRan, backfillDaysFor } from './lib/schedule.js';
+import { pruneToWindow } from './lib/prune.js';
 
 // backfill | delta                    -> Gmail
 // whatsapp-probe                      -> WhatsApp Phase 0: read-only capability probe (no ingest, no LLM)
@@ -493,6 +494,24 @@ async function main() {
         await runSenderBackfill(acct, accessToken, provider, ONLY_SENDER);
       }
       else await runDelta(acct, accessToken, provider);
+      // Rolling retention: on the recurring delta pass, trim derived memory that
+      // has aged out of the connector's total ingestion window. Best-effort —
+      // never blocks or fails the run (see prune.js).
+      if (MODE === 'delta') await pruneToWindow(acct.user_email, acct.card_id);
+      // Record that this connector was just read, so the settings modal's
+      // "Last read" line reflects automatic polls, not only manual Read Now.
+      // Best-effort: a bookkeeping failure must never fail ingestion.
+      if (MODE === 'delta') {
+        try {
+          await admin
+            .from('connector_state')
+            .update({ last_read_at: new Date().toISOString() })
+            .eq('user_email', acct.user_email)
+            .eq('connector_key', acct.card_id);
+        } catch (e) {
+          console.error(`[${acct.user_email}/${acct.card_id}] last_read_at update failed (non-fatal):`, e.message);
+        }
+      }
       console.log(`[${acct.user_email}/${acct.card_id}] ${MODE} done`);
     } catch (err) {
       console.error(`[${acct.user_email}/${acct.card_id}] account failed:`, err.message);

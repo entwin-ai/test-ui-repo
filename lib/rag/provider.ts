@@ -1,4 +1,5 @@
-import type { LlmConfig, LlmProvider } from './llm-keys'
+import type { AnyProvider, LlmConfig, LlmProvider } from './llm-keys'
+import { isSelfHosted } from './llm-keys'
 
 /**
  * LLM-agnostic provider layer (TypeScript port of worker/src/lib/provider.js).
@@ -55,7 +56,7 @@ interface ChatArgs {
 }
 
 export interface BoundProvider {
-  provider: LlmProvider
+  provider: AnyProvider
   model: string
   chatText: (args: ChatArgs) => Promise<string>
   embed: (text: string) => Promise<number[]>
@@ -163,9 +164,65 @@ async function geminiEmbed(apiKey: string, text: string): Promise<number[]> {
   return normalizeDim(j.embedding.values)
 }
 
+// ---- Self-hosted (OpenAI-compatible) --------------------------------------
+// neocloud / onprem expose the OpenAI wire format at a user-supplied base URL.
+// The bearer key is optional (many on-prem deployments are unauthenticated).
+
+function selfHostedBase(endpoint?: string): string {
+  const base = (endpoint || '').trim().replace(/\/+$/, '')
+  if (!base) throw new Error('Self-hosted provider has no endpoint URL configured.')
+  return base
+}
+
+async function selfHostedChat(endpoint: string, apiKey: string, model: string, a: ChatArgs): Promise<string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`
+  const res = await fetch(`${selfHostedBase(endpoint)}/chat/completions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      model,
+      max_tokens: a.maxTokens,
+      messages: [
+        { role: 'system', content: a.system },
+        { role: 'user', content: a.user },
+      ],
+    }),
+  })
+  if (!res.ok) throw new Error(`self-hosted ${res.status}`)
+  const j = await res.json()
+  return j.choices?.[0]?.message?.content ?? ''
+}
+
+async function selfHostedEmbed(endpoint: string, apiKey: string, text: string): Promise<number[]> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`
+  const model = process.env.SELF_HOSTED_EMBED_MODEL || 'text-embedding-3-small'
+  const res = await fetch(`${selfHostedBase(endpoint)}/embeddings`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ model, input: text }),
+  })
+  if (!res.ok) throw new Error(`self-hosted-embed ${res.status}`)
+  const j = await res.json()
+  return normalizeDim(j.data[0].embedding)
+}
+
 export function makeProvider(config: LlmConfig): BoundProvider {
-  const { provider, model, apiKey } = config
-  const chatModel = resolveChatModel(provider, model)
+  const { provider, model, apiKey, endpoint } = config
+
+  if (isSelfHosted(provider)) {
+    // Self-hosted models are passed through verbatim (no hosted label→id map).
+    return {
+      provider,
+      model,
+      chatText: (a) => selfHostedChat(endpoint || '', apiKey, model, a),
+      embed: (t) => selfHostedEmbed(endpoint || '', apiKey, t),
+    }
+  }
+
+  const hosted = provider as LlmProvider
+  const chatModel = resolveChatModel(hosted, model)
   if (provider === 'claude') {
     return {
       provider,

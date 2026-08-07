@@ -1,4 +1,5 @@
 name: whatsapp-pair
+run-name: whatsapp-pair · entwin-user:${{ github.event.inputs.user_email || 'all' }}
 
 # ONE-TIME device pairing for a WhatsApp number. Dispatch this manually with the
 # user's email and phone number; read the printed pairing code from the job log

@@ -18,6 +18,11 @@ import { getSupabaseAdmin } from '@/lib/rag/supabase'
  *      Actions crons enumerate sync_state, so with no rows the user is never
  *      processed again. Revoking the Redis tokens is the belt-and-braces: even a
  *      run already in flight can no longer authenticate to their accounts.
+ *   4. In-flight runs — any GitHub Actions run already executing for this user
+ *      at the moment of deletion is cancelled directly (attributed via the
+ *      per-user run-name marker on the dispatch workflows). This closes the gap
+ *      the earlier version left open. It requires GH_REPO + GH_DISPATCH_TOKEN;
+ *      when those aren't set the step is skipped (token revocation still applies).
  *
  * The function is best-effort and continues past individual failures so a single
  * error can't strand the user half-deleted; it returns a per-step report.
@@ -52,6 +57,7 @@ const sha24 = (s: string) => crypto.createHash('sha256').update(s.toLowerCase())
  * pattern), so we reconstruct each one from the email + the known card ids. Keep
  * this in sync with the key schemes in:
  *   lib/rag/llm-keys.ts        entwin:llm:<sha256("llm::"+email)>
+ *   lib/twin/profile.ts        entwin:profile:<sha256("profile::"+email)>
  *   lib/gmail/service.ts       entwin:gmail:<sha256(email::card)>
  *   lib/slack/service.ts       entwin:slack:<sha256(email::card)>
  *   lib/whatsapp/service.ts    entwin:wa:{creds,keys,paircode}:<sha256(email)>
@@ -61,6 +67,7 @@ function redisKeysForUser(email: string): string[] {
   const slackCards = ['slack-workspace']
   const keys: string[] = [
     `entwin:llm:${sha24(`llm::${email}`)}`,
+    `entwin:profile:${sha24(`profile::${email}`)}`,
     ...gmailCards.map((c) => `entwin:gmail:${sha24(`${email}::${c}`)}`),
     ...slackCards.map((c) => `entwin:slack:${sha24(`${email}::${c}`)}`),
     `entwin:wa:creds:${sha24(email)}`,
@@ -70,9 +77,89 @@ function redisKeysForUser(email: string): string[] {
   return keys
 }
 
-// ---- Supabase --------------------------------------------------------------
+// ---- GitHub Actions (in-flight run cancellation) ---------------------------
 
-// Child-before-parent so explicit deletes never race the FK cascades
+const GH_REPO = process.env.GH_REPO
+const GH_TOKEN = process.env.GH_DISPATCH_TOKEN
+const GH_ENABLED = Boolean(GH_REPO && GH_TOKEN)
+
+// Every user-scoped dispatch workflow embeds the target email in its run-name as
+// `entwin-user:<email>` (see .github/workflows/*.yml). That marker is what makes
+// a run attributable to one user — the dispatch INPUTS aren't queryable from the
+// runs list, but the run's display_title (set from run-name) is. We match on it
+// to cancel only THIS user's in-flight work, never anyone else's.
+function userRunMarker(email: string): string {
+  return `entwin-user:${email.toLowerCase()}`
+}
+
+async function ghFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(`https://api.github.com${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${GH_TOKEN}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      ...(init?.headers || {}),
+    },
+  })
+}
+
+interface CancelResult {
+  attempted: boolean
+  cancelled: number
+  matched: number
+  error?: string
+}
+
+/**
+ * Cancel every in-progress or queued GitHub Actions run attributable to this
+ * user (via the run-name marker). This complements the sync_state deletion:
+ * that stops the user from being PICKED UP again, this stops a run already
+ * executing at the moment of deletion. Best-effort — a failure here never
+ * strands the teardown, and token revocation (Redis step) already neutralizes
+ * any run that keeps executing regardless.
+ */
+async function cancelInFlightRuns(userEmail: string): Promise<CancelResult> {
+  if (!GH_ENABLED) return { attempted: false, cancelled: 0, matched: 0 }
+  const marker = userRunMarker(userEmail)
+  let cancelled = 0
+  let matched = 0
+  try {
+    // Only these two statuses can be cancelled; query each and page a little.
+    for (const status of ['in_progress', 'queued'] as const) {
+      let page = 1
+      // A handful of pages is plenty; a single user won't have hundreds of
+      // concurrent runs, and we never want an unbounded loop in teardown.
+      for (; page <= 5; page++) {
+        const res = await ghFetch(
+          `/repos/${GH_REPO}/actions/runs?status=${status}&per_page=100&page=${page}`,
+        )
+        if (!res.ok) throw new Error(`list runs (${status}) ${res.status}`)
+        const data = (await res.json()) as {
+          workflow_runs?: { id: number; display_title?: string; name?: string }[]
+        }
+        const runs = data.workflow_runs || []
+        if (runs.length === 0) break
+        for (const run of runs) {
+          const hay = `${run.display_title || ''} ${run.name || ''}`.toLowerCase()
+          if (!hay.includes(marker)) continue
+          matched++
+          const cancel = await ghFetch(`/repos/${GH_REPO}/actions/runs/${run.id}/cancel`, {
+            method: 'POST',
+          })
+          // 202 accepted; 409 = already completing/cannot cancel — both fine.
+          if (cancel.ok || cancel.status === 409) cancelled++
+        }
+        if (runs.length < 100) break
+      }
+    }
+    return { attempted: true, cancelled, matched }
+  } catch (e) {
+    return { attempted: true, cancelled, matched, error: (e as Error).message }
+  }
+}
+
+
 // (entity_mention/note_chunk -> memory_note -> email_message; entity_mention ->
 // entity). Deleting by user_email in this order is safe regardless of cascades.
 const USER_TABLES = [
@@ -93,12 +180,31 @@ export interface TeardownReport {
   ok: boolean
   supabase: Record<string, { deleted: boolean; error?: string }>
   redis: { deleted: boolean; keyCount: number; error?: string }
+  githubRuns: { attempted: boolean; cancelled: number; matched: number; error?: string }
   errors: string[]
 }
 
 export async function killTwin(userEmail: string): Promise<TeardownReport> {
-  const report: TeardownReport = { ok: true, supabase: {}, redis: { deleted: false, keyCount: 0 }, errors: [] }
+  const report: TeardownReport = {
+    ok: true,
+    supabase: {},
+    redis: { deleted: false, keyCount: 0 },
+    githubRuns: { attempted: false, cancelled: 0, matched: 0 },
+    errors: [],
+  }
   const admin = getSupabaseAdmin()
+
+  // 4. Cancel any in-flight GitHub Actions run attributable to this user, BEFORE
+  // we delete the sync_state rows that would otherwise let it keep working. This
+  // is the piece the earlier teardown left as a known gap: sync_state deletion
+  // stops the user being picked up again; this stops a run already executing.
+  // Best-effort — never fails the teardown; token revocation (step 2) is the
+  // backstop even if a run somehow survives.
+  report.githubRuns = await cancelInFlightRuns(userEmail)
+  if (report.githubRuns.error) {
+    report.errors.push(`github: ${report.githubRuns.error}`)
+    // Not fatal to overall teardown; leave report.ok as-is unless data steps fail.
+  }
 
   // 1 + 3. Delete all Supabase rows for the user. Removing sync_state here is
   // also what decommissions the user's scheduled GitHub Actions processing.

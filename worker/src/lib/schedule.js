@@ -71,6 +71,34 @@ export async function backfillDaysFor(userEmail, cardId) {
   return clampDays(raw);
 }
 
+// "Total ingestion window", in days — the rolling range Entwin keeps indexed
+// going forward. Mirrors the UI stepper bounds (lib/connectors/state.ts:
+// 30..3650, default 365). Data older than this window is pruned. The window can
+// never be shorter than the backfill (enforced app-side on save; re-floored here
+// defensively so a stale row can't prune inside freshly-backfilled history).
+const WINDOW_MIN_DAYS = 30;
+const WINDOW_MAX_DAYS = 3650;
+const WINDOW_DEFAULT_DAYS = 365;
+
+export async function windowDaysFor(userEmail, cardId) {
+  const { data, error } = await admin
+    .from('connector_state')
+    .select('settings')
+    .eq('user_email', userEmail)
+    .eq('connector_key', cardId)
+    .maybeSingle();
+  if (error) {
+    console.error(`[${userEmail}/${cardId}] totalWindowDays read failed:`, error.message);
+    return WINDOW_DEFAULT_DAYS;
+  }
+  const s = (data && data.settings) || {};
+  let v = Number(s.totalWindowDays);
+  if (!Number.isFinite(v)) v = WINDOW_DEFAULT_DAYS;
+  v = Math.min(WINDOW_MAX_DAYS, Math.max(WINDOW_MIN_DAYS, Math.trunc(v)));
+  const backfill = clampDays(s.backfillDays);
+  return Math.max(v, backfill);
+}
+
 /**
  * Decide whether this account's delta is due now.
  * Due when it has never run (last_delta_at is null) or when at least

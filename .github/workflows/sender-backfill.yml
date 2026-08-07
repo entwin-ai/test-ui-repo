@@ -1,4 +1,5 @@
 name: gmail-sender-backfill
+run-name: gmail-sender-backfill · entwin-user:${{ github.event.inputs.user_email || 'all' }}
 
 # Dispatched by POST /api/gmail/ingest after a Gmail card connects.
 on:
