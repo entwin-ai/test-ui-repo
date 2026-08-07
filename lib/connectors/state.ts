@@ -103,19 +103,45 @@ export interface ConnectorStateRecord {
   lastReadAt: string | null
 }
 
+// Postgres/PostgREST signal for a missing column (migration 0019 not applied
+// yet). When we see it, we fall back to selecting without last_read_at so an
+// un-migrated database never breaks connector reads (which the Gmail scan and
+// several other paths depend on). The "Last read" line simply shows "Never"
+// until the migration runs.
+function isMissingLastReadColumn(err: { message?: string; code?: string } | null): boolean {
+  if (!err) return false
+  const msg = (err.message || '').toLowerCase()
+  return (
+    err.code === '42703' || // undefined_column
+    (msg.includes('last_read_at') && (msg.includes('does not exist') || msg.includes('column')))
+  )
+}
+
+const BASE_COLS = 'connector_key, connected, settings'
+const COLS_WITH_READ = `${BASE_COLS}, last_read_at`
+
 /** Every stored row for this user, keyed by connectorKey for easy lookup. */
 export async function getAllConnectorState(
   userEmail: string,
 ): Promise<Record<string, ConnectorStateRecord>> {
-  const { data, error } = await getSupabaseAdmin()
+  const supa = getSupabaseAdmin()
+  const first = await supa
     .from('connector_state')
-    .select('connector_key, connected, settings, last_read_at')
+    .select(COLS_WITH_READ)
     .eq('user_email', userEmail)
 
-  if (error) throw new Error(error.message)
+  let rows: Record<string, unknown>[]
+  if (first.error && isMissingLastReadColumn(first.error)) {
+    const fallback = await supa.from('connector_state').select(BASE_COLS).eq('user_email', userEmail)
+    if (fallback.error) throw new Error(fallback.error.message)
+    rows = (fallback.data ?? []) as Record<string, unknown>[]
+  } else {
+    if (first.error) throw new Error(first.error.message)
+    rows = (first.data ?? []) as unknown as Record<string, unknown>[]
+  }
 
   const out: Record<string, ConnectorStateRecord> = {}
-  for (const row of data ?? []) {
+  for (const row of rows) {
     const key = row.connector_key as string
     if (!isConnectorKey(key)) continue
     out[key] = {
@@ -133,14 +159,29 @@ export async function getConnectorState(
   userEmail: string,
   connectorKey: ConnectorKey,
 ): Promise<ConnectorStateRecord | null> {
-  const { data, error } = await getSupabaseAdmin()
+  const supa = getSupabaseAdmin()
+  const first = await supa
     .from('connector_state')
-    .select('connector_key, connected, settings, last_read_at')
+    .select(COLS_WITH_READ)
     .eq('user_email', userEmail)
     .eq('connector_key', connectorKey)
     .maybeSingle()
 
-  if (error) throw new Error(error.message)
+  let data: Record<string, unknown> | null
+  if (first.error && isMissingLastReadColumn(first.error)) {
+    const fallback = await supa
+      .from('connector_state')
+      .select(BASE_COLS)
+      .eq('user_email', userEmail)
+      .eq('connector_key', connectorKey)
+      .maybeSingle()
+    if (fallback.error) throw new Error(fallback.error.message)
+    data = (fallback.data as Record<string, unknown> | null) ?? null
+  } else {
+    if (first.error) throw new Error(first.error.message)
+    data = (first.data as unknown as Record<string, unknown> | null) ?? null
+  }
+
   if (!data) return null
   return {
     connectorKey,
@@ -198,20 +239,27 @@ export async function touchLastRead(
 ): Promise<string> {
   const now = new Date().toISOString()
   const existing = await getConnectorState(userEmail, connectorKey)
-  const { error } = await getSupabaseAdmin()
+  const supa = getSupabaseAdmin()
+  const base = {
+    user_email: userEmail,
+    connector_key: connectorKey,
+    // Preserve current toggle/settings when the row already exists; default
+    // for a brand-new row (reading implies the card is in use).
+    connected: existing?.connected ?? false,
+    settings: existing?.settings ?? DEFAULT_SETTINGS,
+  }
+
+  let { error } = await supa
     .from('connector_state')
-    .upsert(
-      {
-        user_email: userEmail,
-        connector_key: connectorKey,
-        // Preserve current toggle/settings when the row already exists; default
-        // for a brand-new row (reading implies the card is in use).
-        connected: existing?.connected ?? false,
-        settings: existing?.settings ?? DEFAULT_SETTINGS,
-        last_read_at: now,
-      },
-      { onConflict: 'user_email,connector_key' },
-    )
+    .upsert({ ...base, last_read_at: now }, { onConflict: 'user_email,connector_key' })
+
+  // If migration 0019 hasn't been applied, upsert the row WITHOUT the timestamp
+  // so the read still succeeds — the "Last read" line just stays "Never".
+  if (error && isMissingLastReadColumn(error)) {
+    ;({ error } = await supa
+      .from('connector_state')
+      .upsert(base, { onConflict: 'user_email,connector_key' }))
+  }
   if (error) throw new Error(error.message)
   return now
 }
