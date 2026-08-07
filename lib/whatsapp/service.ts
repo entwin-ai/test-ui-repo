@@ -24,10 +24,24 @@
 
 import crypto from 'crypto'
 import { getSupabaseAdmin } from '@/lib/rag/supabase'
+import { getConnectorState, DEFAULT_SETTINGS } from '@/lib/connectors/state'
 
 export const WA_CARD_ID = 'whatsapp'
 export const INITIAL_WINDOW_DAYS = 30
-const INITIAL_WINDOW_MS = INITIAL_WINDOW_DAYS * 24 * 60 * 60 * 1000
+
+// The one-time backfill window in days comes from the connector's "Initial
+// ingestion (one-time backfill)" setting (connector_state.settings.backfillDays),
+// exactly like Gmail. Falls back to the 30-day default when the user never saved
+// a value. Returns a clamped, whole number of days.
+async function backfillDaysFor(email: string): Promise<number> {
+  try {
+    const state = await getConnectorState(email, 'whatsapp')
+    const days = state?.settings?.backfillDays ?? DEFAULT_SETTINGS.backfillDays
+    return Math.max(1, Math.trunc(days))
+  } catch {
+    return INITIAL_WINDOW_DAYS
+  }
+}
 
 export type WaState = 'disconnected' | 'pairing' | 'connected'
 
@@ -108,7 +122,10 @@ async function getPairCode(
 
 /** Ensure the sync_state row exists so the hourly job enumerates this account. */
 async function ensureSyncState(email: string): Promise<void> {
-  const floorIso = new Date(Date.now() - INITIAL_WINDOW_MS).toISOString()
+  // Honor the user's "Initial ingestion (one-time backfill)" setting for the
+  // floor, so saving e.g. 10 pulls the last 10 days rather than a fixed 30.
+  const days = await backfillDaysFor(email)
+  const floorIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
   const { error } = await getSupabaseAdmin()
     .from('sync_state')
     .upsert(

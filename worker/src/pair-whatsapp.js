@@ -33,8 +33,30 @@ function fail(msg) {
   process.exit(1);
 }
 
+// Read the user's "Initial ingestion (one-time backfill)" setting
+// (connector_state.settings.backfillDays) so pairing seeds the same window the
+// app would. Falls back to the 30-day default if unset or unreadable. Clamped to
+// a sane 1..3650 range.
+async function backfillDaysForUser() {
+  try {
+    const { data } = await admin
+      .from('connector_state')
+      .select('settings')
+      .eq('user_email', USER_EMAIL)
+      .eq('connector_key', 'whatsapp')
+      .maybeSingle();
+    const raw = data?.settings?.backfillDays;
+    const n = Math.trunc(Number(raw));
+    if (Number.isFinite(n) && n >= 1) return Math.min(n, 3650);
+  } catch {
+    /* fall through to default */
+  }
+  return INITIAL_WINDOW_DAYS;
+}
+
 async function ensureSyncStateRow() {
-  const floorIso = new Date(Date.now() - INITIAL_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const days = await backfillDaysForUser();
+  const floorIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   const { error } = await admin.from('sync_state').upsert(
     {
       user_email: USER_EMAIL,
