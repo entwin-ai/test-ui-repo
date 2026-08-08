@@ -683,6 +683,13 @@ function ConnectorsView({
   const toggle = (idx: number) => {
     const c = connectors[idx]
 
+    // Babelscribe: the button is an "Upload GDrive Audio Path" action, not a
+    // connect/disconnect toggle. It never flips connected state.
+    if (c.key === 'browser-history') {
+      // TODO: wire the GDrive audio-path upload flow here.
+      return
+    }
+
     // Animatics: Connect opens the Phase 1 flow (starting/continuing a run);
     // Disconnect forgets the last run so the user can start fresh from step 1.
     if (c.icon === 'animatics') {
@@ -805,6 +812,9 @@ function ConnectorsView({
         } else {
           statusText = 'Not connected'
         }
+        if (babelscribe) {
+          statusText = 'upload multi-lingual audio to translate and transcribe'
+        }
 
         // Gmail ingestion overrides the desc + status: while the gmail-calibrate
         // job runs, both "Email ingestion for the vault." and "Not connected"
@@ -825,7 +835,9 @@ function ConnectorsView({
         }
 
         // Buttons: Gmail scanning shows a disabled "Reading…" state.
-        const btnLabel = animatics
+        const btnLabel = babelscribe
+          ? 'Upload GDrive Audio Path'
+          : animatics
           ? animaticsConnected
             ? 'Disconnect'
             : 'Connect'
@@ -965,7 +977,7 @@ function ConnectorsView({
                   </button>
                 )}
                 <button
-                  className={`connect-toggle ${(animatics ? animaticsConnected : c.connected) ? 'connected' : ''}`}
+                  className={`connect-toggle ${!babelscribe && (animatics ? animaticsConnected : c.connected) ? 'connected' : ''}`}
                   onClick={() => toggle(idx)}
                   disabled={connectDisabled}
                   title={
