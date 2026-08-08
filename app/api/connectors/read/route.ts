@@ -49,7 +49,7 @@ async function dispatchWorkflow(
  *   2. It records `last_read_at` on the connector_state row so the modal's
  *      "Last read" line stops saying "Never".
  *
- * For a backend-less card (Drive, Calendar, Browser history, Animatics) there's
+ * For a backend-less card (Drive, Calendar, Babelscribe, Animatics) there's
  * nothing to fetch yet, so it only records the timestamp — the honest behavior
  * rather than faking a read.
  *

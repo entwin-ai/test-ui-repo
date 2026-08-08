@@ -8,7 +8,7 @@ import type { ConnectorKey } from './state'
  * `service` groups cards that share a backend (both Gmail cards → gmail).
  * `backendOwned` is true only when there is a real OAuth/token flow behind the
  * card — those support a live status check and a real disconnect. The rest
- * (Drive, Calendar, Browser history, Animatics) are backend-less in this build:
+ * (Drive, Calendar, Babelscribe, Animatics) are backend-less in this build:
  * their Connect/Disconnect is an honestly-persisted toggle and "Read Now" just
  * records the timestamp, because there is nothing to actually fetch yet.
  *

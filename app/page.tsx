@@ -87,6 +87,9 @@ const BRAND_ICONS: Record<string, JSX.Element> = {
       </g>
     </svg>
   ),
+  babelscribe: (
+    <img src="/babelscribe.png" alt="Babelscribe" width={48} height={48} style={{ display: 'block', borderRadius: 11 }} />
+  ),
 }
 
 interface GmailScan {
@@ -180,7 +183,7 @@ const INITIAL_CONNECTORS: Connector[] = [
   { name: 'WhatsApp', service: 'whatsapp', code: 'WA', key: 'whatsapp', desc: 'Personal messages, vectorized into cross-channel memory.', connected: false, connectedEmail: null, wa: null },
   { name: 'Animatics', service: null, icon: 'animatics', key: 'animatics', desc: 'Create Anime from your Novel', connected: false, connectedEmail: null },
   { name: 'Slack', service: 'slack', icon: 'slack', slackCardId: 'slack-workspace', key: 'slack-workspace', desc: 'Work channel ingestion — pulls the last 1 month of Slack chats.', connected: false, connectedEmail: null, slackScan: null },
-  { name: 'Browser history', service: null, code: 'BH', key: 'browser-history', desc: 'Search activity as raw source.', connected: false, connectedEmail: null },
+  { name: 'Babelscribe', service: null, icon: 'babelscribe', key: 'browser-history', desc: 'Search activity as raw source.', connected: false, connectedEmail: null },
 ]
 
 /**
@@ -762,7 +765,7 @@ function ConnectorsView({
       return
     }
 
-    // Everything else (Drive, Calendar, Browser history) has no backend of its
+    // Everything else (Drive, Calendar, Babelscribe) has no backend of its
     // own, so the toggle IS the persisted state. Flip locally, then save.
     const nextConnected = !c.connected
     setConnectors((prev) =>
@@ -792,7 +795,7 @@ function ConnectorsView({
         let statusText: string
         if (whatsapp && c.wa) {
           if (c.wa.state === 'pairing') statusText = 'Pairing — enter code on phone'
-          else if (c.wa.state === 'connected') statusText = 'Linked · syncs hourly'
+          else if (c.wa.state === 'connected') statusText = 'Linked'
           else statusText = 'Not connected'
         } else if (slack && c.connected) {
           statusText = c.slackTeam ? `Connected · ${c.slackTeam}` : 'Connected'
