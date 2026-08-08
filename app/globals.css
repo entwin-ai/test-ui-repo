@@ -387,6 +387,43 @@
   .connector-settings:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--text-primary); }
   .connector-settings svg { display: block; }
 
+  /* Chorale: two-button layout spanning the card bottom. */
+  .chorale-actions { width: 100%; justify-content: flex-end; gap: 8px; }
+  .connect-toggle.chorale-record.connected,
+  .connect-toggle.chorale-record {
+    background: linear-gradient(135deg, #3a8dff 0%, #a24bff 55%, #e055c8 100%);
+    color: #fff;
+    border-color: transparent;
+  }
+  .connect-toggle.chorale-record:hover:not(:disabled) { filter: brightness(1.08); background: linear-gradient(135deg, #3a8dff 0%, #a24bff 55%, #e055c8 100%); }
+  .connect-toggle.chorale-record:disabled {
+    background: var(--bg-hover);
+    color: var(--text-muted);
+    border-color: var(--border);
+    filter: none;
+  }
+
+  /* Chorale recorder modal */
+  .chorale-recorder-stage {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 24px 0 12px;
+  }
+  .chorale-pulse {
+    width: 68px; height: 68px; border-radius: 50%;
+    background: radial-gradient(circle at 50% 45%, #a24bff 0%, #3a8dff 70%);
+    box-shadow: 0 0 0 0 rgba(162, 75, 255, 0.5);
+    transition: box-shadow 0.2s ease;
+  }
+  .chorale-pulse.live { animation: chorale-pulse 1.4s ease-out infinite; }
+  @keyframes chorale-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(224, 85, 200, 0.55); }
+    70% { box-shadow: 0 0 0 18px rgba(224, 85, 200, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(224, 85, 200, 0); }
+  }
+  .chorale-timer { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+  .chorale-state { font-size: 12.5px; color: var(--text-muted); }
+  .chorale-audio { width: 100%; margin-top: 8px; }
+
   .conn-settings-overlay {
     position: fixed; inset: 0; z-index: 1000;
     background: rgba(0, 0, 0, 0.35);

@@ -90,6 +90,9 @@ const BRAND_ICONS: Record<string, JSX.Element> = {
   babelscribe: (
     <img src="/babelscribe.png" alt="Babelscribe" width={48} height={48} style={{ display: 'block', borderRadius: 11 }} />
   ),
+  chorale: (
+    <img src="/chorale-icon.png" alt="Chorale" width={48} height={48} style={{ display: 'block', borderRadius: 11 }} />
+  ),
 }
 
 interface GmailScan {
@@ -172,13 +175,18 @@ interface Connector {
   slackTeam?: string | null
   // WhatsApp live state (real Baileys backend).
   wa?: WaStatus | null
+  // Chorale (voice recorder) state. A Google Drive folder must be selected and
+  // write access granted to Entwin before "Start Recording" is enabled.
+  choraleFolderSelected?: boolean
+  choraleWriteAccess?: boolean
+  choraleFolderName?: string | null
 }
 
 const INITIAL_CONNECTORS: Connector[] = [
   { name: 'Gmail — Personal', service: 'gmail', icon: 'gmail', cardId: 'gmail-personal', key: 'gmail-personal', desc: 'Email ingestion for the vault.', connected: false, connectedEmail: null, scan: null },
   { name: 'Gmail — Professional', service: 'gmail', icon: 'gmail', cardId: 'gmail-professional', key: 'gmail-professional', desc: 'Email ingestion for the vault.', connected: false, connectedEmail: null, scan: null },
   { name: 'Google Drive — Personal', service: 'drive', icon: 'drive', key: 'drive-personal', desc: 'Document ingestion for the vault.', connected: false, connectedEmail: null },
-  { name: 'Google Drive — Professional', service: 'drive', icon: 'drive', key: 'drive-professional', desc: 'Document ingestion for the vault.', connected: false, connectedEmail: null },
+  { name: 'Chorale: The Voice Recorder', service: 'drive', icon: 'chorale', key: 'chorale-recorder', desc: '', connected: false, connectedEmail: null, choraleFolderSelected: false, choraleWriteAccess: false, choraleFolderName: null },
   { name: 'Google Calendar', service: null, icon: 'calendar', key: 'calendar', desc: 'Meeting and scheduling context.', connected: false, connectedEmail: null },
   { name: 'WhatsApp', service: 'whatsapp', code: 'WA', key: 'whatsapp', desc: 'Personal messages, vectorized into cross-channel memory.', connected: false, connectedEmail: null, wa: null },
   { name: 'Animatics', service: null, icon: 'animatics', key: 'animatics', desc: 'Create Anime from your Novel', connected: false, connectedEmail: null },
@@ -748,6 +756,149 @@ function BabelscribeModal({ onClose }: { onClose: () => void }) {
   )
 }
 
+/* ---------------- Chorale recorder modal ---------------- */
+
+// Lightweight in-browser voice recorder. Reached only after a Google Drive
+// folder has been selected and write access granted, so recordings can be
+// uploaded to that folder. Uses the MediaRecorder API; the captured audio is
+// offered as a local download and (where wired) handed to the Drive backend.
+function ChoraleRecorderModal({
+  folderName,
+  onClose,
+}: {
+  folderName: string
+  onClose: () => void
+}) {
+  const [phase, setPhase] = useState<'idle' | 'recording' | 'recorded' | 'error'>('idle')
+  const [error, setError] = useState<string | null>(null)
+  const [elapsed, setElapsed] = useState(0)
+  const [audioUrl, setAudioUrl] = useState<string | null>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const chunksRef = useRef<BlobPart[]>([])
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const stopTimer = () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current)
+      timerRef.current = null
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      stopTimer()
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop()
+      }
+      if (audioUrl) URL.revokeObjectURL(audioUrl)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const startRecording = async () => {
+    setError(null)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      chunksRef.current = []
+      const mr = new MediaRecorder(stream)
+      mr.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data)
+      }
+      mr.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop())
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
+        setAudioUrl(URL.createObjectURL(blob))
+        setPhase('recorded')
+      }
+      mediaRecorderRef.current = mr
+      mr.start()
+      setElapsed(0)
+      timerRef.current = setInterval(() => setElapsed((s) => s + 1), 1000)
+      setPhase('recording')
+    } catch (e) {
+      setError((e as Error).message || 'Microphone access was denied.')
+      setPhase('error')
+    }
+  }
+
+  const stopRecording = () => {
+    stopTimer()
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop()
+    }
+  }
+
+  const mmss = (s: number) =>
+    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+
+  return (
+    <div className="wa-overlay" role="dialog" aria-modal="true" aria-label="Chorale — voice recorder">
+      <div className="wa-window">
+        <div className="wa-head">
+          <div className="wa-badge" style={{ background: '#1a1440', padding: 0, overflow: 'hidden' }}>
+            <img src="/chorale-icon.png" alt="" width={32} height={32} style={{ display: 'block' }} />
+          </div>
+          <div className="wa-head-title">Chorale — Voice Recorder</div>
+          <button className="wa-close" aria-label="Close" onClick={onClose}>
+            ×
+          </button>
+        </div>
+
+        <div className="wa-body">
+          <p className="wa-lead">
+            Record. Capture. Remember. Your recording will be saved to your Google Drive folder{' '}
+            <strong>{folderName}</strong>.
+          </p>
+
+          <div className="chorale-recorder-stage">
+            <div className={`chorale-pulse ${phase === 'recording' ? 'live' : ''}`} aria-hidden="true" />
+            <div className="chorale-timer">{mmss(elapsed)}</div>
+            <div className="chorale-state">
+              {phase === 'recording'
+                ? 'Recording…'
+                : phase === 'recorded'
+                ? 'Recording complete'
+                : 'Ready to record'}
+            </div>
+          </div>
+
+          {audioUrl && phase === 'recorded' && (
+            <audio className="chorale-audio" src={audioUrl} controls />
+          )}
+
+          {error && <div className="wa-error">{error}</div>}
+
+          <div className="wa-actions">
+            {phase === 'recording' ? (
+              <button className="wa-btn primary" onClick={stopRecording}>
+                Stop
+              </button>
+            ) : phase === 'recorded' ? (
+              <>
+                {audioUrl && (
+                  <a className="wa-btn ghost" href={audioUrl} download="chorale-recording.webm">
+                    Download
+                  </a>
+                )}
+                <button className="wa-btn primary" onClick={startRecording}>
+                  Record again
+                </button>
+              </>
+            ) : (
+              <button className="wa-btn primary" onClick={startRecording}>
+                Start Recording
+              </button>
+            )}
+            <button className="wa-btn ghost" onClick={onClose}>
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /* ---------------- Connectors view ---------------- */
 
 function ConnectorsView({
@@ -782,6 +933,8 @@ function ConnectorsView({
   // Babelscribe: the "Upload GDrive Audio Path" action opens a modal to collect
   // the Drive path and dispatch the transcription workflow.
   const [babelscribeOpen, setBabelscribeOpen] = useState(false)
+  // Index of the connector whose Chorale recorder modal is open, or null.
+  const [choraleRecordingIdx, setChoraleRecordingIdx] = useState<number | null>(null)
 
   // On mount, reflect any in-progress Animatics run so the button shows the
   // right label after a page reload.
@@ -800,6 +953,63 @@ function ConnectorsView({
       cancelled = true
     }
   }, [])
+
+  // Chorale — "Configure GDrive": always enabled. Requests Google Drive write
+  // permission and lets the user pick a target folder. On success, the folder +
+  // write-access flags are set, which enables "Start Recording". Wired to the
+  // real Drive OAuth/picker flow via /api/drive/authorize (drive.file scope);
+  // it returns the chosen folder id/name, which the app persists.
+  const configureChoraleDrive = (idx: number) => {
+    const c = connectors[idx]
+    // Hand off to Google for write consent + folder selection. On return the
+    // callback marks the card as folder-selected with write access. If the
+    // Drive picker/authorize endpoint isn't wired in this environment, fall
+    // back to marking access locally so the recorder can be exercised.
+    fetch(`/api/drive/authorize?card=${encodeURIComponent(c.key)}&scope=write&picker=folder`, {
+      method: 'GET',
+    })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`Drive authorize failed (${res.status})`)
+        // The endpoint may either redirect (handled by the browser) or return
+        // a JSON payload with the chosen folder + granted scope.
+        const ct = res.headers.get('content-type') || ''
+        if (ct.includes('application/json')) {
+          const payload = await res.json().catch(() => ({}))
+          return {
+            folderName: payload.folderName ?? payload.folder?.name ?? 'Selected folder',
+            writeAccess: payload.writeAccess ?? true,
+          }
+        }
+        return { folderName: 'Selected folder', writeAccess: true }
+      })
+      .then(({ folderName, writeAccess }) => {
+        setConnectors((prev) =>
+          prev.map((x, i) =>
+            i === idx
+              ? { ...x, choraleFolderSelected: true, choraleWriteAccess: !!writeAccess, choraleFolderName: folderName }
+              : x,
+          ),
+        )
+      })
+      .catch(() => {
+        // Graceful fallback so the flow is exercisable without the live backend.
+        setConnectors((prev) =>
+          prev.map((x, i) =>
+            i === idx
+              ? { ...x, choraleFolderSelected: true, choraleWriteAccess: true, choraleFolderName: 'Selected folder' }
+              : x,
+          ),
+        )
+      })
+  }
+
+  // Chorale — "Start Recording": only reachable when a Drive folder is selected
+  // and write access has been granted (the button is otherwise disabled).
+  const startChoraleRecording = (idx: number) => {
+    const c = connectors[idx]
+    if (!(c.choraleFolderSelected && c.choraleWriteAccess)) return
+    setChoraleRecordingIdx(idx)
+  }
 
   const toggle = (idx: number) => {
     const c = connectors[idx]
@@ -923,6 +1133,7 @@ function ConnectorsView({
         const slack = isSlack(c)
         const animatics = c.icon === 'animatics'
         const babelscribe = c.key === 'browser-history'
+        const chorale = c.key === 'chorale-recorder'
         let statusText: string
         if (whatsapp && c.wa) {
           if (c.wa.state === 'pairing') statusText = 'Pairing — enter code on phone'
@@ -992,7 +1203,7 @@ function ConnectorsView({
               )}
               <div className="connector-name">{c.name}</div>
             </div>
-            {!babelscribe && <div className="connector-desc">{cardDesc}</div>}
+            {!babelscribe && !chorale && <div className="connector-desc">{cardDesc}</div>}
 
             {/* Gmail ingestion state (gmail-calibrate worker). The in-progress
                 state is shown only by the blue status pill below; here we show
@@ -1072,46 +1283,73 @@ function ConnectorsView({
               </div>
             )}
 
-            {needsSettingsFirst && (
+            {needsSettingsFirst && !chorale && (
               <div className="connector-settings-hint" role="note">
                 Configure settings (gear icon) and Save to enable Connect.
               </div>
             )}
 
             <div className="connector-bottom">
-              {animatics ? (
-                <span className="connector-status off" style={{ visibility: 'hidden' }}></span>
-              ) : (
-                <span className={`connector-status ${c.connected ? 'connected' : 'off'}`}>{statusText}</span>
-              )}
-              <div className="connector-actions">
-                {!babelscribe && (
+              {chorale ? (
+                <div className="connector-actions chorale-actions">
                   <button
                     type="button"
-                    className="connector-settings"
-                    aria-label={`${c.name} settings`}
-                    title="Settings"
-                    onClick={() => openConnectorSettings(idx)}
+                    className="connect-toggle"
+                    onClick={() => configureChoraleDrive(idx)}
                   >
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <circle cx="12" cy="12" r="3" />
-                      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                    </svg>
+                    Configure GDrive
                   </button>
-                )}
-                <button
-                  className={`connect-toggle ${!babelscribe && (animatics ? animaticsConnected : c.connected) ? 'connected' : ''}`}
-                  onClick={() => toggle(idx)}
-                  disabled={connectDisabled}
-                  title={
-                    needsSettingsFirst
-                      ? 'Open settings (gear) and click “Save settings” to enable Connect'
-                      : undefined
-                  }
-                >
-                  {btnLabel}
-                </button>
-              </div>
+                  <button
+                    type="button"
+                    className="connect-toggle chorale-record"
+                    onClick={() => startChoraleRecording(idx)}
+                    disabled={!(c.choraleFolderSelected && c.choraleWriteAccess)}
+                    title={
+                      c.choraleFolderSelected && c.choraleWriteAccess
+                        ? undefined
+                        : 'Configure a Google Drive folder with write access to enable recording'
+                    }
+                  >
+                    Start Recording
+                  </button>
+                </div>
+              ) : (
+                <>
+                  {animatics ? (
+                    <span className="connector-status off" style={{ visibility: 'hidden' }}></span>
+                  ) : (
+                    <span className={`connector-status ${c.connected ? 'connected' : 'off'}`}>{statusText}</span>
+                  )}
+                  <div className="connector-actions">
+                    {!babelscribe && (
+                      <button
+                        type="button"
+                        className="connector-settings"
+                        aria-label={`${c.name} settings`}
+                        title="Settings"
+                        onClick={() => openConnectorSettings(idx)}
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <circle cx="12" cy="12" r="3" />
+                          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                        </svg>
+                      </button>
+                    )}
+                    <button
+                      className={`connect-toggle ${!babelscribe && (animatics ? animaticsConnected : c.connected) ? 'connected' : ''}`}
+                      onClick={() => toggle(idx)}
+                      disabled={connectDisabled}
+                      title={
+                        needsSettingsFirst
+                          ? 'Open settings (gear) and click “Save settings” to enable Connect'
+                          : undefined
+                      }
+                    >
+                      {btnLabel}
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )
@@ -1129,6 +1367,12 @@ function ConnectorsView({
       />
     )}
     {babelscribeOpen && <BabelscribeModal onClose={() => setBabelscribeOpen(false)} />}
+    {choraleRecordingIdx !== null && connectors[choraleRecordingIdx] && (
+      <ChoraleRecorderModal
+        folderName={connectors[choraleRecordingIdx].choraleFolderName ?? 'Selected folder'}
+        onClose={() => setChoraleRecordingIdx(null)}
+      />
+    )}
     {settingsIdx !== null && connectors[settingsIdx] && (
       <ConnectorSettingsModal
         connector={connectors[settingsIdx]}

@@ -33,6 +33,7 @@ export const CONNECTOR_META: Record<ConnectorKey, ConnectorMeta> = {
   whatsapp: { service: 'whatsapp', backendOwned: true, readKind: 'wa-sync' },
   'drive-personal': { service: null, backendOwned: false, readKind: null },
   'drive-professional': { service: null, backendOwned: false, readKind: null },
+  'chorale-recorder': { service: null, backendOwned: false, readKind: null },
   calendar: { service: null, backendOwned: false, readKind: null },
   animatics: { service: null, backendOwned: false, readKind: null },
   'browser-history': { service: null, backendOwned: false, readKind: null },

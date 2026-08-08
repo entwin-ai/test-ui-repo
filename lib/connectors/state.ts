@@ -18,6 +18,7 @@ export const CONNECTOR_KEYS = [
   'gmail-professional',
   'drive-personal',
   'drive-professional',
+  'chorale-recorder',
   'calendar',
   'whatsapp',
   'animatics',
