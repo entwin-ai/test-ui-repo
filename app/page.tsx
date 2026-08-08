@@ -792,6 +792,7 @@ function ConnectorsView({
         const whatsapp = isWhatsApp(c)
         const slack = isSlack(c)
         const animatics = c.icon === 'animatics'
+        const babelscribe = c.key === 'browser-history'
         let statusText: string
         if (whatsapp && c.wa) {
           if (c.wa.state === 'pairing') statusText = 'Pairing — enter code on phone'
@@ -842,7 +843,8 @@ function ConnectorsView({
         // the gear/settings button is always enabled so the user can create the
         // row first.
         const isConnectedNow = animatics ? animaticsConnected : c.connected
-        const needsSettingsFirst = !c.settingsPersisted && !isConnectedNow
+        // Babelscribe's Connect is always enabled — it has no settings to save first.
+        const needsSettingsFirst = !babelscribe && !c.settingsPersisted && !isConnectedNow
         const connectDisabled = c.scanning || needsSettingsFirst
 
         return (
@@ -855,7 +857,7 @@ function ConnectorsView({
               )}
               <div className="connector-name">{c.name}</div>
             </div>
-            <div className="connector-desc">{cardDesc}</div>
+            {!babelscribe && <div className="connector-desc">{cardDesc}</div>}
 
             {/* Gmail ingestion state (gmail-calibrate worker). The in-progress
                 state is shown only by the blue status pill below; here we show
@@ -948,18 +950,20 @@ function ConnectorsView({
                 <span className={`connector-status ${c.connected ? 'connected' : 'off'}`}>{statusText}</span>
               )}
               <div className="connector-actions">
-                <button
-                  type="button"
-                  className="connector-settings"
-                  aria-label={`${c.name} settings`}
-                  title="Settings"
-                  onClick={() => openConnectorSettings(idx)}
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="3" />
-                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                  </svg>
-                </button>
+                {!babelscribe && (
+                  <button
+                    type="button"
+                    className="connector-settings"
+                    aria-label={`${c.name} settings`}
+                    title="Settings"
+                    onClick={() => openConnectorSettings(idx)}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="3" />
+                      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                    </svg>
+                  </button>
+                )}
                 <button
                   className={`connect-toggle ${(animatics ? animaticsConnected : c.connected) ? 'connected' : ''}`}
                   onClick={() => toggle(idx)}
