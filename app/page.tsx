@@ -631,6 +631,122 @@ function WhatsAppModal({
   )
 }
 
+/* ---------------- Babelscribe modal ---------------- */
+
+type BabelPhase = 'input' | 'submitting' | 'started' | 'error'
+
+function BabelscribeModal({ onClose }: { onClose: () => void }) {
+  const [phase, setPhase] = useState<BabelPhase>('input')
+  const [path, setPath] = useState('')
+  const [runsUrl, setRunsUrl] = useState<string | null>(null)
+  const [message, setMessage] = useState<string>('')
+  const [error, setError] = useState<string | null>(null)
+
+  // Light client-side check that the path contains something id-like, so we can
+  // enable the button. The server does the authoritative extraction/validation.
+  const looksValid =
+    /\/d\/[a-zA-Z0-9_-]{10,}/.test(path) ||
+    /[?&]id=[a-zA-Z0-9_-]{10,}/.test(path) ||
+    /^[a-zA-Z0-9_-]{10,}$/.test(path.trim())
+
+  const submit = async () => {
+    if (!looksValid) {
+      setError('Paste a Google Drive share link (…/file/d/<id>/view) or the bare file id.')
+      return
+    }
+    setError(null)
+    setPhase('submitting')
+    try {
+      const res = await fetch('/api/babelscribe/transcribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ drivePath: path.trim() }),
+      })
+      const raw = await res.text()
+      let payload: any = {}
+      try {
+        payload = raw ? JSON.parse(raw) : {}
+      } catch {
+        /* ignore */
+      }
+      if (!res.ok) throw new Error(payload.error || `Request failed (${res.status})`)
+      setRunsUrl(payload.runsUrl ?? null)
+      setMessage(payload.message ?? 'Transcription started.')
+      setPhase('started')
+    } catch (e) {
+      setError((e as Error).message)
+      setPhase('error')
+    }
+  }
+
+  return (
+    <div className="wa-overlay" role="dialog" aria-modal="true" aria-label="Babelscribe — transcribe Google Drive audio">
+      <div className="wa-window">
+        <div className="wa-head">
+          <div className="wa-badge" style={{ background: '#20325A' }}>BS</div>
+          <div className="wa-head-title">Babelscribe — GDrive audio</div>
+          <button className="wa-close" aria-label="Close" onClick={onClose}>
+            ×
+          </button>
+        </div>
+
+        {phase === 'input' || phase === 'submitting' || phase === 'error' ? (
+          <div className="wa-body">
+            <p className="wa-lead">
+              Paste the Google Drive path to a multi-lingual audio file. Babelscribe produces one English
+              transcript, keeping any non-English speech translated but wrapped in brackets (e.g.{' '}
+              <code>[hi: …]</code>). The file must have “anyone with the link” read access.
+            </p>
+            <label className="wa-label" htmlFor="bs-path">
+              Google Drive audio path
+            </label>
+            <input
+              id="bs-path"
+              className="wa-input"
+              type="text"
+              autoFocus
+              placeholder="https://drive.google.com/file/d/FILE_ID/view?usp=sharing"
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && looksValid && phase !== 'submitting') submit()
+              }}
+              disabled={phase === 'submitting'}
+            />
+            {error && <div className="wa-error">{error}</div>}
+            <div className="wa-actions">
+              <button className="wa-btn ghost" onClick={onClose} disabled={phase === 'submitting'}>
+                Cancel
+              </button>
+              <button className="wa-btn primary" onClick={submit} disabled={!looksValid || phase === 'submitting'}>
+                {phase === 'submitting' ? 'Starting…' : 'Transcribe'}
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {phase === 'started' ? (
+          <div className="wa-body wa-success">
+            <div className="wa-check" style={{ background: '#20325A' }}>✓</div>
+            <div className="wa-success-title">Transcription started</div>
+            <p className="wa-fineprint">{message}</p>
+            {runsUrl && (
+              <a className="wa-link" href={runsUrl} target="_blank" rel="noreferrer">
+                Open the transcription job ↗
+              </a>
+            )}
+            <div className="wa-actions" style={{ justifyContent: 'center', marginTop: 16 }}>
+              <button className="wa-btn primary" onClick={onClose}>
+                Done
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 /* ---------------- Connectors view ---------------- */
 
 function ConnectorsView({
@@ -662,6 +778,10 @@ function ConnectorsView({
   const openConnectorSettings = (idx: number) => setSettingsIdx(idx)
   const closeConnectorSettings = () => setSettingsIdx(null)
 
+  // Babelscribe: the "Upload GDrive Audio Path" action opens a modal to collect
+  // the Drive path and dispatch the transcription workflow.
+  const [babelscribeOpen, setBabelscribeOpen] = useState(false)
+
   // On mount, reflect any in-progress Animatics run so the button shows the
   // right label after a page reload.
   useEffect(() => {
@@ -684,9 +804,11 @@ function ConnectorsView({
     const c = connectors[idx]
 
     // Babelscribe: the button is an "Upload GDrive Audio Path" action, not a
-    // connect/disconnect toggle. It never flips connected state.
+    // connect/disconnect toggle. It opens the modal that collects the Drive
+    // path and dispatches the transcription workflow. It never flips connected
+    // state.
     if (c.key === 'browser-history') {
-      // TODO: wire the GDrive audio-path upload flow here.
+      setBabelscribeOpen(true)
       return
     }
 
@@ -1005,6 +1127,7 @@ function ConnectorsView({
         }}
       />
     )}
+    {babelscribeOpen && <BabelscribeModal onClose={() => setBabelscribeOpen(false)} />}
     {settingsIdx !== null && connectors[settingsIdx] && (
       <ConnectorSettingsModal
         connector={connectors[settingsIdx]}

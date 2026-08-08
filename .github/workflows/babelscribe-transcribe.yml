@@ -1,0 +1,70 @@
+name: babelscribe-transcribe
+run-name: babelscribe · ${{ github.event.inputs.user_email || 'manual' }} · ${{ github.event.inputs.run_id }}
+
+# Babelscribe — download a Google Drive audio file and produce a single English
+# transcript, keeping non-English speech translated-but-bracketed. Dispatched by
+# the app's POST /api/babelscribe/transcribe route (or manually). The audio is
+# assumed to have "anyone with the link" read access, so no Drive credentials
+# are needed — gdown fetches it directly.
+#
+# The finished transcript.txt / transcript.json are uploaded as a build
+# artifact you can download from the run page.
+on:
+  workflow_dispatch:
+    inputs:
+      user_email:
+        description: "User's email (the app account that requested this)"
+        required: false
+      drive_file_id:
+        description: 'Google Drive file id of the audio (globally readable)'
+        required: true
+      run_id:
+        description: 'Correlation id from the app (echoed into outputs)'
+        required: false
+      model_size:
+        description: 'faster-whisper model (large-v3 = best accuracy, medium = faster on CPU)'
+        required: false
+        default: 'large-v3'
+
+concurrency:
+  group: babelscribe-${{ github.event.inputs.run_id || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python deps
+        working-directory: worker/babelscribe
+        run: pip install -r requirements.txt
+
+      - name: Transcribe + translate
+        working-directory: worker/babelscribe
+        env:
+          DRIVE_FILE_ID: ${{ github.event.inputs.drive_file_id }}
+          RUN_ID: ${{ github.event.inputs.run_id }}
+          MODEL_SIZE: ${{ github.event.inputs.model_size }}
+          OUT_DIR: out
+          # CPU runners: int8 keeps large-v3 within memory/time budget.
+          WHISPER_DEVICE: cpu
+          WHISPER_COMPUTE: int8
+        run: python transcribe.py
+
+      - name: Upload transcript
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: babelscribe-transcript-${{ github.event.inputs.run_id || github.run_id }}
+          path: worker/babelscribe/out/
+          if-no-files-found: warn
