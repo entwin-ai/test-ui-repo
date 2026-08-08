@@ -1,0 +1,67 @@
+name: whatsapp-delta
+run-name: whatsapp-delta · entwin-user:${{ github.event.inputs.user_email || 'all' }}
+
+# On-demand WhatsApp differential read ("Read Now" in the WhatsApp connector
+# settings). This is the user-triggered counterpart to the hourly whatsapp-sync
+# heartbeat: it opens a short-lived Baileys socket for the scoped account, drains
+# WhatsApp's offline backlog into the whatsapp_message ledger (the "difference"
+# since the last read), then vectorizes the new rows into memory notes +
+# entities + embeddings — the same bounded capture+vectorize run whatsapp-sync
+# does, but scoped to one user and fired immediately on demand.
+#
+# It reuses MODE=whatsapp-sync (capture + vectorize). The vectorize step only
+# touches rows with processed_at IS NULL, so first run backfills and later runs
+# are true deltas — safe to run on demand regardless of the hourly schedule.
+#
+# Pairing is done once, out of band, via whatsapp-pair; this job requires an
+# already-linked device.
+on:
+  workflow_dispatch:
+    inputs:
+      user_email:
+        description: 'Scope to one user email (blank = all linked)'
+        required: false
+        default: ''
+
+concurrency:
+  # Never overlap with the hourly sync (or another on-demand run) for the same
+  # scope — a second socket for the same device while the first is draining
+  # causes WhatsApp to close both. Shared prefix with whatsapp-sync's group.
+  group: wa-sync-${{ github.event.inputs.user_email || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  whatsapp-delta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ingestion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install
+        working-directory: worker
+        run: npm install --omit=dev
+      - name: Run WhatsApp delta (capture + vectorize)
+        working-directory: worker
+        env:
+          # Same real work as the hourly sync — capture the offline difference
+          # and vectorize it — scoped to the dispatched user.
+          MODE: whatsapp-sync
+          ONLY_USER: ${{ github.event.inputs.user_email }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # WhatsApp auth creds + per-user LLM keys both live in this Redis.
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          ENTWIN_KEY_SECRET: ${{ secrets.ENTWIN_KEY_SECRET }}
+          CLAUDE_EMBED_MODEL: ${{ secrets.CLAUDE_EMBED_MODEL }}
+          OPENAI_EMBED_MODEL: ${{ secrets.OPENAI_EMBED_MODEL }}
+          GEMINI_EMBED_MODEL: ${{ secrets.GEMINI_EMBED_MODEL }}
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          INGEST_CONCURRENCY: ${{ vars.INGEST_CONCURRENCY }}
+          # Optional tuning of the per-run drain window (see whatsapp-capture.js).
+          WA_DRAIN_MS: ${{ vars.WA_DRAIN_MS }}
+          WA_QUIET_MS: ${{ vars.WA_QUIET_MS }}
+        run: npm start

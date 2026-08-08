@@ -2,20 +2,50 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireUser } from '@/lib/gmail/route-helpers'
 import { isConnectorKey, touchLastRead } from '@/lib/connectors/state'
 import { connectorMeta } from '@/lib/connectors/meta'
-import { scan as gmailScan } from '@/lib/gmail/service'
 import { scan as slackScan } from '@/lib/slack/service'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
+
+/** Fire a GitHub Actions workflow_dispatch. Returns a short outcome for the UI. */
+async function dispatchWorkflow(
+  workflowFile: string,
+  inputs: Record<string, string>,
+): Promise<{ ok: boolean; detail: string }> {
+  const repo = process.env.GH_REPO
+  const token = process.env.GH_DISPATCH_TOKEN
+  if (!repo || !token) {
+    return { ok: false, detail: 'Ingestion worker not configured (GH_REPO / GH_DISPATCH_TOKEN unset).' }
+  }
+  const ref = process.env.GH_WORKFLOW_REF || 'main'
+  const res = await fetch(
+    `https://api.github.com/repos/${repo}/actions/workflows/${workflowFile}/dispatches`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      body: JSON.stringify({ ref, inputs }),
+    },
+  )
+  // 204 No Content = accepted.
+  if (res.status === 204) return { ok: true, detail: 'Read requested.' }
+  const body = await res.text().catch(() => '')
+  return { ok: false, detail: `Dispatch failed (${res.status})${body ? `: ${body.slice(0, 140)}` : ''}` }
+}
 
 /**
  * POST /api/connectors/read  { connectorKey }
  *
  * The "Read Now" button on the connector settings modal. Two things happen:
  *
- *   1. For a BACKEND-OWNED connector (Gmail / Slack / WhatsApp) it triggers a
- *      real on-demand read — a Gmail/Slack scan, or a WhatsApp sync dispatch —
- *      exactly what the recurring poll would do, but now.
+ *   1. For a BACKEND-OWNED connector it triggers a real on-demand read:
+ *        - Gmail    → dispatches the gmail-delta GitHub Action (forced, scoped
+ *                     to this user + card) to pull new/changed mail now.
+ *        - Slack    → an on-demand scan.
+ *        - WhatsApp → dispatches the whatsapp-delta workflow (capture + vectorize).
  *   2. It records `last_read_at` on the connector_state row so the modal's
  *      "Last read" line stops saying "Never".
  *
@@ -40,30 +70,25 @@ export async function POST(req: NextRequest) {
   let read: { attempted: boolean; ok: boolean; detail?: string } = { attempted: false, ok: true }
 
   try {
-    if (meta.readKind === 'gmail-scan') {
-      await gmailScan(auth.email, connectorKey)
-      read = { attempted: true, ok: true }
+    if (meta.readKind === 'gmail-delta') {
+      // "Read Now" for Gmail triggers the gmail-delta GitHub Action scoped to
+      // this user + card, forcing an immediate differential read (bypassing the
+      // per-user cadence gate). The worker pulls only new/changed mail.
+      read = { attempted: true, ...(await dispatchWorkflow('delta.yml', {
+        user_email: auth.email,
+        card_id: connectorKey,
+        force: 'true',
+      })) }
     } else if (meta.readKind === 'slack-scan') {
       await slackScan(auth.email, connectorKey)
       read = { attempted: true, ok: true }
     } else if (meta.readKind === 'wa-sync') {
-      // WhatsApp reads run in the worker; nudge the workflow if dispatch is
-      // configured (same fire-and-forget as /api/whatsapp/sync).
-      if (process.env.GH_REPO && process.env.GH_DISPATCH_TOKEN) {
-        await fetch(
-          `https://api.github.com/repos/${process.env.GH_REPO}/actions/workflows/whatsapp-sync.yml/dispatches`,
-          {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${process.env.GH_DISPATCH_TOKEN}`,
-              Accept: 'application/vnd.github+json',
-              'X-GitHub-Api-Version': '2022-11-28',
-            },
-            body: JSON.stringify({ ref: 'main', inputs: { user_email: auth.email } }),
-          },
-        ).catch(() => {})
-      }
-      read = { attempted: true, ok: true, detail: 'Sync requested.' }
+      // "Read Now" for WhatsApp triggers the whatsapp-delta GitHub Action scoped
+      // to this user: it drains the offline backlog (the difference since the
+      // last read) and vectorizes it — an immediate, on-demand differential read.
+      read = { attempted: true, ...(await dispatchWorkflow('whatsapp-delta.yml', {
+        user_email: auth.email,
+      })) }
     }
   } catch (e) {
     read = { attempted: true, ok: false, detail: (e as Error).message }

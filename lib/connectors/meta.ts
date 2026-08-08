@@ -18,7 +18,7 @@ import type { ConnectorKey } from './state'
  *   - 'wa-sync'     → dispatch the whatsapp sync
  *   - null          → no real read; timestamp only
  */
-export type ReadKind = 'gmail-scan' | 'slack-scan' | 'wa-sync' | null
+export type ReadKind = 'gmail-delta' | 'slack-scan' | 'wa-sync' | null
 
 export interface ConnectorMeta {
   service: 'gmail' | 'slack' | 'whatsapp' | null
@@ -27,8 +27,8 @@ export interface ConnectorMeta {
 }
 
 export const CONNECTOR_META: Record<ConnectorKey, ConnectorMeta> = {
-  'gmail-personal': { service: 'gmail', backendOwned: true, readKind: 'gmail-scan' },
-  'gmail-professional': { service: 'gmail', backendOwned: true, readKind: 'gmail-scan' },
+  'gmail-personal': { service: 'gmail', backendOwned: true, readKind: 'gmail-delta' },
+  'gmail-professional': { service: 'gmail', backendOwned: true, readKind: 'gmail-delta' },
   'slack-workspace': { service: 'slack', backendOwned: true, readKind: 'slack-scan' },
   whatsapp: { service: 'whatsapp', backendOwned: true, readKind: 'wa-sync' },
   'drive-personal': { service: null, backendOwned: false, readKind: null },

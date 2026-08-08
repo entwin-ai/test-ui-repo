@@ -1,29 +1,47 @@
 name: gmail-delta
+run-name: gmail-delta · entwin-user:${{ github.event.inputs.user_email || 'all' }}
 
 # Differential sync across connected Gmail accounts (gmail rows in sync_state).
 #
 # HEARTBEAT vs PER-USER CADENCE:
-# This cron is only a HEARTBEAT. On each tick the worker inspects every gmail
-# account and runs delta for one ONLY if that user's chosen "Reading frequency"
-# (pollHours in connector_state.settings) has elapsed since the account's last
-# successful delta (sync_state.last_delta_at). So user X on 3h and user Y on 10h
-# each sync at their own cadence off this single schedule — see worker
-# lib/schedule.js and the Gmail delta loop in worker/src/index.js.
+# On the scheduled tick this cron is only a HEARTBEAT. The worker inspects every
+# gmail account and runs delta for one ONLY if that user's chosen "Reading
+# frequency" (pollHours in connector_state.settings) has elapsed since the
+# account's last successful delta (sync_state.last_delta_at). So user X on 3h and
+# user Y on 10h each sync at their own cadence off this single schedule — see
+# worker lib/schedule.js and the Gmail delta loop in worker/src/index.js.
+#
+# ON-DEMAND ("Read Now"):
+# The app also dispatches this workflow with a user_email + card_id (and
+# force=true) when the user clicks "Read Now" in a connector's settings. In that
+# mode the run is scoped to that one account and BYPASSES the cadence gate so the
+# delta happens immediately regardless of when it last ran.
 #
 # Hourly, because the smallest selectable frequency is 1 hour; a finer tick
-# would just skip most accounts every time. Bump to '*/30 * * * *' if you later
-# allow sub-hourly frequencies, or drive workflow_dispatch from pg_cron /
-# Trigger.dev / QStash for tighter guarantees.
+# would just skip most accounts every time.
 #
 # CAVEAT: GitHub cron is best-effort — runs can be delayed 15-30+ min or skipped
 # under load, and the schedule auto-DISABLES after 60 days of repo inactivity.
 on:
   schedule:
     - cron: '0 * * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      user_email:
+        description: 'Scope the delta to a single user (on-demand). Blank = all due accounts.'
+        required: false
+      card_id:
+        description: 'Scope the delta to a single Gmail card (e.g. gmail-personal).'
+        required: false
+      force:
+        description: 'Bypass the per-user cadence gate and run the delta now.'
+        required: false
+        default: 'false'
 
 concurrency:
-  group: delta-all
+  # A per-user on-demand run gets its own group so it never queues behind (or
+  # cancels) the all-accounts heartbeat, and vice-versa.
+  group: delta-${{ github.event.inputs.user_email || 'all' }}
   cancel-in-progress: false
 
 jobs:
@@ -43,6 +61,13 @@ jobs:
         working-directory: worker
         env:
           MODE: delta
+          # Optional single-account scoping for on-demand "Read Now" dispatches.
+          # Blank on the scheduled run → the worker processes all due accounts.
+          ONLY_USER: ${{ github.event.inputs.user_email }}
+          ONLY_CARD: ${{ github.event.inputs.card_id }}
+          # When true, the worker skips the pollHours cadence check and runs the
+          # delta immediately (used by "Read Now").
+          FORCE_DELTA: ${{ github.event.inputs.force }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}

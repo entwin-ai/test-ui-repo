@@ -33,6 +33,8 @@ const MODE = process.env.MODE || 'delta';
 const CONCURRENCY = Math.max(1, parseInt(process.env.INGEST_CONCURRENCY || '6', 10));
 const ONLY_USER = process.env.ONLY_USER || null; // optional single-user run
 const ONLY_CARD = process.env.ONLY_CARD || null; // optional single-card run
+// On-demand "Read Now" sets this true to bypass the delta cadence gate.
+const FORCE_DELTA = String(process.env.FORCE_DELTA || '').toLowerCase() === 'true';
 const ONLY_SENDER = process.env.ONLY_SENDER || null; // optional single-sender backfill
 const ONLY_IDENTITY_KEY = process.env.ONLY_IDENTITY_KEY || null; // WhatsApp move-backfill target
 
@@ -435,15 +437,22 @@ async function main() {
       // This is what makes user X (every 3h) and user Y (every 10h) each run at
       // their own cadence off one shared heartbeat cron.
       if (MODE === 'delta') {
-        const { due, pollHours, nextDueAt } = await deltaDue(acct);
-        if (!due) {
-          console.log(
-            `[${acct.user_email}/${acct.card_id}] not due (every ${pollHours}h; ` +
-              `next ~${nextDueAt ? nextDueAt.toISOString() : 'n/a'}) — skipping`,
-          );
-          continue;
+        // "Read Now" dispatches set FORCE_DELTA=true to run immediately,
+        // bypassing the per-user cadence gate. Any other value keeps the normal
+        // pollHours scheduling.
+        if (FORCE_DELTA) {
+          console.log(`[${acct.user_email}/${acct.card_id}] forced delta (on-demand) — running now`);
+        } else {
+          const { due, pollHours, nextDueAt } = await deltaDue(acct);
+          if (!due) {
+            console.log(
+              `[${acct.user_email}/${acct.card_id}] not due (every ${pollHours}h; ` +
+                `next ~${nextDueAt ? nextDueAt.toISOString() : 'n/a'}) — skipping`,
+            );
+            continue;
+          }
+          console.log(`[${acct.user_email}/${acct.card_id}] due (every ${pollHours}h) — running delta`);
         }
-        console.log(`[${acct.user_email}/${acct.card_id}] due (every ${pollHours}h) — running delta`);
       }
 
       // trash-reconcile is metadata only — no LLM key needed.
