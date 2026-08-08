@@ -80,6 +80,6 @@ export async function POST(req: NextRequest) {
     runId,
     runsUrl,
     message:
-      'Transcription started. Babelscribe is downloading the audio and producing an English transcript (non-English parts kept in brackets). The result is uploaded as a workflow artifact.',
+      'Transcription started. Babelscribe is downloading the audio and producing an English transcript (non-English parts kept in brackets). The result PDF will be emailed to you and uploaded as a workflow artifact.',
   })
 }

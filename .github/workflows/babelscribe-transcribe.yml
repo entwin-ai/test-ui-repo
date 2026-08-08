@@ -37,8 +37,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install ffmpeg + fonts
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
 
       - uses: actions/setup-python@v5
         with:
@@ -56,6 +56,10 @@ jobs:
           RUN_ID: ${{ github.event.inputs.run_id }}
           MODEL_SIZE: ${{ github.event.inputs.model_size }}
           OUT_DIR: out
+          # Emailing the result PDF to the user who requested it.
+          USER_EMAIL: ${{ github.event.inputs.user_email }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          BABELSCRIBE_EMAIL_FROM: ${{ vars.BABELSCRIBE_EMAIL_FROM }}
           # CPU runners: int8 keeps large-v3 within memory/time budget.
           WHISPER_DEVICE: cpu
           WHISPER_COMPUTE: int8

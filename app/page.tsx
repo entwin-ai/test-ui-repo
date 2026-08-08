@@ -695,7 +695,8 @@ function BabelscribeModal({ onClose }: { onClose: () => void }) {
             <p className="wa-lead">
               Paste the Google Drive path to a multi-lingual audio file. Babelscribe produces one English
               transcript, keeping any non-English speech translated but wrapped in brackets (e.g.{' '}
-              <code>[hi: …]</code>). The file must have “anyone with the link” read access.
+              <code>[hi: …]</code>). The result PDF is emailed to your login address. The file must have
+              “anyone with the link” read access.
             </p>
             <label className="wa-label" htmlFor="bs-path">
               Google Drive audio path

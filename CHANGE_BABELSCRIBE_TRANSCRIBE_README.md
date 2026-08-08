@@ -57,3 +57,33 @@ No new secrets. Reuses the existing dispatch env:
 - `.github/workflows/babelscribe-transcribe.yml` — the job.
 - `worker/babelscribe/transcribe.py` — the transcription/translation worker.
 - `worker/babelscribe/requirements.txt` — Python deps.
+
+---
+
+## Update — bug fix + emailed PDF
+
+### Fixed
+`WhisperModel.transcribe()` has no `multilingual` argument in faster-whisper
+1.0.3 (the earlier code passed it and crashed on pass 1). Per-segment language
+is now identified from the **Unicode script** of the transcribe-pass text
+(Devanagari→hi, Bengali→bn, Hebrew→he, Latin→en) — exact for these languages and
+needs no extra model.
+
+### Added — result emailed as PDF
+- The worker now renders `transcript.pdf` (fpdf2) and emails it as an attachment
+  to the **logged-in user** (`auth.email`, passed through as the workflow's
+  `user_email` → `USER_EMAIL`). Email goes through **Resend**, the same provider
+  the app already uses for Animatics.
+- The workflow installs `fonts-dejavu-core` so any stray non-Latin glyphs render
+  in the PDF.
+
+### Config for the email step
+- `RESEND_API_KEY` — repo **secret** (required to send). If unset, the job still
+  completes and the PDF is available as the artifact; it just skips the email.
+- `BABELSCRIBE_EMAIL_FROM` — optional repo **variable**, e.g.
+  `Babelscribe <no-reply@yourdomain.com>`. Defaults to Resend's
+  `onboarding@resend.dev` (fine for testing; use a verified domain for real
+  delivery).
+
+### Outputs now
+`transcript.txt`, `transcript.pdf` (emailed + artifact), `transcript.json`.
