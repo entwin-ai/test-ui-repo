@@ -388,7 +388,13 @@
   .connector-settings svg { display: block; }
 
   /* Chorale: two-button layout spanning the card bottom. */
+  .chorale-actions-wrap { display: flex; flex-direction: column; gap: 8px; width: 100%; }
   .chorale-actions { width: 100%; justify-content: flex-end; gap: 8px; }
+  .chorale-recorder-note {
+    font-size: 10.5px; line-height: 1.4; color: var(--text-muted);
+    border-top: 1px dashed var(--border); padding-top: 6px;
+  }
+  .chorale-recorder-note strong { color: var(--text-primary); font-weight: 600; }
   .connect-toggle.chorale-record.connected,
   .connect-toggle.chorale-record {
     background: linear-gradient(135deg, #3a8dff 0%, #a24bff 55%, #e055c8 100%);

@@ -176,18 +176,24 @@ interface Connector {
   // WhatsApp live state (real Baileys backend).
   wa?: WaStatus | null
   // Chorale (voice recorder) state. A Google Drive folder must be selected and
-  // write access granted to Entwin before "Start Recording" is enabled.
+  // write access granted to Entwin before the recorder can be turned on.
   choraleFolderSelected?: boolean
   choraleWriteAccess?: boolean
   choraleFolderName?: string | null
   choraleFolderId?: string | null
+  // Chorale "Turn-on Recorder": when armed, Chorale ingests new Meet native
+  // recordings from the configured Drive folder into Babelscribe. Arming never
+  // starts a Meet recording — it only enables ingest of what Meet writes.
+  choraleRecorderArmed?: boolean
+  // Transient: the arm/disarm toggle is in flight.
+  choraleRecorderBusy?: boolean
 }
 
 const INITIAL_CONNECTORS: Connector[] = [
   { name: 'Gmail — Personal', service: 'gmail', icon: 'gmail', cardId: 'gmail-personal', key: 'gmail-personal', desc: 'Email ingestion for the vault.', connected: false, connectedEmail: null, scan: null },
   { name: 'Gmail — Professional', service: 'gmail', icon: 'gmail', cardId: 'gmail-professional', key: 'gmail-professional', desc: 'Email ingestion for the vault.', connected: false, connectedEmail: null, scan: null },
   { name: 'Google Drive — Personal', service: 'drive', icon: 'drive', key: 'drive-personal', desc: 'Document ingestion for the vault.', connected: false, connectedEmail: null },
-  { name: 'Chorale: The Voice Recorder', service: 'drive', icon: 'chorale', key: 'chorale-recorder', desc: '', connected: false, connectedEmail: null, choraleFolderSelected: false, choraleWriteAccess: false, choraleFolderName: null, choraleFolderId: null },
+  { name: 'Chorale: The Voice Recorder', service: 'drive', icon: 'chorale', key: 'chorale-recorder', desc: '', connected: false, connectedEmail: null, choraleFolderSelected: false, choraleWriteAccess: false, choraleFolderName: null, choraleFolderId: null, choraleRecorderArmed: false },
   { name: 'Google Calendar', service: null, icon: 'calendar', key: 'calendar', desc: 'Meeting and scheduling context.', connected: false, connectedEmail: null },
   { name: 'WhatsApp', service: 'whatsapp', code: 'WA', key: 'whatsapp', desc: 'Personal messages, vectorized into cross-channel memory.', connected: false, connectedEmail: null, wa: null },
   { name: 'Animatics', service: null, icon: 'animatics', key: 'animatics', desc: 'Create Anime from your Novel', connected: false, connectedEmail: null },
@@ -904,149 +910,6 @@ function ChoraleDriveUrlModal({
   )
 }
 
-/* ---------------- Chorale recorder modal ---------------- */
-
-// Lightweight in-browser voice recorder. Reached only after a Google Drive
-// folder has been selected and write access granted, so recordings can be
-// uploaded to that folder. Uses the MediaRecorder API; the captured audio is
-// offered as a local download and (where wired) handed to the Drive backend.
-function ChoraleRecorderModal({
-  folderName,
-  onClose,
-}: {
-  folderName: string
-  onClose: () => void
-}) {
-  const [phase, setPhase] = useState<'idle' | 'recording' | 'recorded' | 'error'>('idle')
-  const [error, setError] = useState<string | null>(null)
-  const [elapsed, setElapsed] = useState(0)
-  const [audioUrl, setAudioUrl] = useState<string | null>(null)
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const chunksRef = useRef<BlobPart[]>([])
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
-
-  const stopTimer = () => {
-    if (timerRef.current) {
-      clearInterval(timerRef.current)
-      timerRef.current = null
-    }
-  }
-
-  useEffect(() => {
-    return () => {
-      stopTimer()
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-        mediaRecorderRef.current.stop()
-      }
-      if (audioUrl) URL.revokeObjectURL(audioUrl)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const startRecording = async () => {
-    setError(null)
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      chunksRef.current = []
-      const mr = new MediaRecorder(stream)
-      mr.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data)
-      }
-      mr.onstop = () => {
-        stream.getTracks().forEach((t) => t.stop())
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
-        setAudioUrl(URL.createObjectURL(blob))
-        setPhase('recorded')
-      }
-      mediaRecorderRef.current = mr
-      mr.start()
-      setElapsed(0)
-      timerRef.current = setInterval(() => setElapsed((s) => s + 1), 1000)
-      setPhase('recording')
-    } catch (e) {
-      setError((e as Error).message || 'Microphone access was denied.')
-      setPhase('error')
-    }
-  }
-
-  const stopRecording = () => {
-    stopTimer()
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop()
-    }
-  }
-
-  const mmss = (s: number) =>
-    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
-
-  return (
-    <div className="wa-overlay" role="dialog" aria-modal="true" aria-label="Chorale — voice recorder">
-      <div className="wa-window">
-        <div className="wa-head">
-          <div className="wa-badge" style={{ background: '#1a1440', padding: 0, overflow: 'hidden' }}>
-            <img src="/chorale-icon.png" alt="" width={32} height={32} style={{ display: 'block' }} />
-          </div>
-          <div className="wa-head-title">Chorale — Voice Recorder</div>
-          <button className="wa-close" aria-label="Close" onClick={onClose}>
-            ×
-          </button>
-        </div>
-
-        <div className="wa-body">
-          <p className="wa-lead">
-            Record. Capture. Remember. Your recording will be saved to your Google Drive folder{' '}
-            <strong>{folderName}</strong>.
-          </p>
-
-          <div className="chorale-recorder-stage">
-            <div className={`chorale-pulse ${phase === 'recording' ? 'live' : ''}`} aria-hidden="true" />
-            <div className="chorale-timer">{mmss(elapsed)}</div>
-            <div className="chorale-state">
-              {phase === 'recording'
-                ? 'Recording…'
-                : phase === 'recorded'
-                ? 'Recording complete'
-                : 'Ready to record'}
-            </div>
-          </div>
-
-          {audioUrl && phase === 'recorded' && (
-            <audio className="chorale-audio" src={audioUrl} controls />
-          )}
-
-          {error && <div className="wa-error">{error}</div>}
-
-          <div className="wa-actions">
-            {phase === 'recording' ? (
-              <button className="wa-btn primary" onClick={stopRecording}>
-                Stop
-              </button>
-            ) : phase === 'recorded' ? (
-              <>
-                {audioUrl && (
-                  <a className="wa-btn ghost" href={audioUrl} download="chorale-recording.webm">
-                    Download
-                  </a>
-                )}
-                <button className="wa-btn primary" onClick={startRecording}>
-                  Record again
-                </button>
-              </>
-            ) : (
-              <button className="wa-btn primary" onClick={startRecording}>
-                Start Recording
-              </button>
-            )}
-            <button className="wa-btn ghost" onClick={onClose}>
-              Close
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 /* ---------------- Google Drive folder explorer ---------------- */
 
 interface DriveExplorerFolder {
@@ -1302,8 +1165,6 @@ function ConnectorsView({
   // Babelscribe: the "Upload GDrive Audio Path" action opens a modal to collect
   // the Drive path and dispatch the transcription workflow.
   const [babelscribeOpen, setBabelscribeOpen] = useState(false)
-  // Index of the connector whose Chorale recorder modal is open, or null.
-  const [choraleRecordingIdx, setChoraleRecordingIdx] = useState<number | null>(null)
   // Index of the connector whose Drive folder-explorer modal is open, or null.
   // Opened after the Drive write-access consent returns (?drive=connected).
   const [driveExplorerIdx, setDriveExplorerIdx] = useState<number | null>(null)
@@ -1363,13 +1224,98 @@ function ConnectorsView({
     setChoraleDriveUrlIdx(null)
   }
 
-  // Chorale — "Start Recording": only reachable when a Drive folder is selected
-  // and write access has been granted (the button is otherwise disabled).
-  const startChoraleRecording = (idx: number) => {
+  // Chorale — "Turn-on Recorder": arms (or disarms) native-recording ingest.
+  // Only reachable when a Drive folder is selected and write access granted.
+  // Arming enables Chorale to watch the configured Meet Recordings folder and
+  // hand new Meet recordings to Babelscribe; it does NOT start a Meet recording.
+  const toggleChoraleRecorder = async (idx: number) => {
     const c = connectors[idx]
     if (!(c.choraleFolderSelected && c.choraleWriteAccess)) return
-    setChoraleRecordingIdx(idx)
+    if (c.choraleRecorderBusy) return
+    const next = !c.choraleRecorderArmed
+
+    setConnectors((prev) =>
+      prev.map((x, i) => (i === idx ? { ...x, choraleRecorderBusy: true } : x)),
+    )
+    try {
+      const res = await fetch('/api/drive/recorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ card: c.key, armed: next }),
+      })
+      const raw = await res.text()
+      let payload: any = {}
+      try {
+        payload = raw ? JSON.parse(raw) : {}
+      } catch {
+        /* ignore */
+      }
+      if (!res.ok) throw new Error(payload.error || `Request failed (${res.status})`)
+      const armed = !!payload.recorderArmed
+      setConnectors((prev) =>
+        prev.map((x, i) =>
+          i === idx ? { ...x, choraleRecorderArmed: armed, choraleRecorderBusy: false } : x,
+        ),
+      )
+    } catch (e) {
+      setConnectors((prev) =>
+        prev.map((x, i) => (i === idx ? { ...x, choraleRecorderBusy: false } : x)),
+      )
+      setDriveNotice((e as Error).message)
+    }
   }
+
+  // Scan the configured folder for new Meet recordings and dispatch them to
+  // Babelscribe. Used both by an armed auto-poll (below) and could back a manual
+  // "check now" affordance. Surfaces a concise result via the Drive notice.
+  const scanChoraleRecordings = async (cardKey: string, announce: boolean) => {
+    try {
+      const res = await fetch('/api/drive/scan-recordings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ card: cardKey }),
+      })
+      if (!res.ok) return
+      const d = (await res.json()) as {
+        ok?: boolean
+        skipped?: boolean
+        dispatched?: number
+        failed?: number
+      }
+      if (d.skipped) return
+      if (announce && (d.dispatched ?? 0) > 0) {
+        setDriveNotice(
+          `Found ${d.dispatched} new Meet recording${d.dispatched === 1 ? '' : 's'} — sent to Babelscribe to transcribe.`,
+        )
+      }
+    } catch {
+      /* best-effort; a failed scan retries on the next poll */
+    }
+  }
+
+  // While the recorder is armed AND the app is open, poll the configured folder
+  // periodically so recordings Meet writes are picked up without user action.
+  // (A true server-side cron would need the Drive tokens in the DB; today the
+  // Drive session lives in the app, so ingest runs while a tab is open. The
+  // scan is idempotent — already-dispatched files are skipped.)
+  useEffect(() => {
+    const chorale = connectors.find((c) => c.key === 'chorale-recorder')
+    if (!chorale?.choraleRecorderArmed) return
+    let cancelled = false
+    // Kick once shortly after arming/mount, then every 5 minutes.
+    const first = setTimeout(() => {
+      if (!cancelled) scanChoraleRecordings('chorale-recorder', true)
+    }, 4000)
+    const iv = setInterval(() => {
+      if (!cancelled) scanChoraleRecordings('chorale-recorder', true)
+    }, 5 * 60 * 1000)
+    return () => {
+      cancelled = true
+      clearTimeout(first)
+      clearInterval(iv)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectors.find((c) => c.key === 'chorale-recorder')?.choraleRecorderArmed])
 
   // On mount, hydrate the Chorale card from its server-side Drive session so a
   // previously granted write scope and chosen folder survive a page refresh
@@ -1388,6 +1334,7 @@ function ConnectorsView({
           connectedEmail?: string | null
           writeAccess?: boolean
           selectedFolder?: { id: string; name: string; path: string } | null
+          recorderArmed?: boolean
         }
         if (cancelled) return
         const connected = d.state === 'connected'
@@ -1400,6 +1347,7 @@ function ConnectorsView({
                   choraleFolderSelected: connected && !!d.selectedFolder,
                   choraleFolderId: d.selectedFolder?.id ?? null,
                   choraleFolderName: d.selectedFolder?.path ?? d.selectedFolder?.name ?? x.choraleFolderName ?? null,
+                  choraleRecorderArmed: connected && !!d.recorderArmed,
                   connectedEmail: d.connectedEmail ?? x.connectedEmail ?? null,
                 }
               : x,
@@ -1438,6 +1386,7 @@ function ConnectorsView({
               connectedEmail?: string | null
               writeAccess?: boolean
               selectedFolder?: { id: string; name: string; path: string } | null
+              recorderArmed?: boolean
             }
             const connected = d.state === 'connected'
             setConnectors((prev) =>
@@ -1453,6 +1402,7 @@ function ConnectorsView({
                         d.selectedFolder?.name ??
                         x.choraleFolderName ??
                         null,
+                      choraleRecorderArmed: connected && !!d.recorderArmed,
                       connectedEmail: d.connectedEmail ?? x.connectedEmail ?? null,
                     }
                   : x,
@@ -1815,27 +1765,51 @@ function ConnectorsView({
 
             <div className="connector-bottom">
               {chorale ? (
-                <div className="connector-actions chorale-actions">
-                  <button
-                    type="button"
-                    className="connect-toggle"
-                    onClick={() => configureChoraleDrive(idx)}
-                  >
-                    Configure GDrive
-                  </button>
-                  <button
-                    type="button"
-                    className="connect-toggle chorale-record"
-                    onClick={() => startChoraleRecording(idx)}
-                    disabled={!(c.choraleFolderSelected && c.choraleWriteAccess)}
-                    title={
-                      c.choraleFolderSelected && c.choraleWriteAccess
-                        ? undefined
-                        : 'Configure a Google Drive folder with write access to enable recording'
-                    }
-                  >
-                    Start Recording
-                  </button>
+                <div className="chorale-actions-wrap">
+                  <div className="connector-actions chorale-actions">
+                    <button
+                      type="button"
+                      className="connect-toggle"
+                      onClick={() => configureChoraleDrive(idx)}
+                    >
+                      Configure GDrive
+                    </button>
+                    <button
+                      type="button"
+                      className={`connect-toggle chorale-record ${c.choraleRecorderArmed ? 'connected' : ''}`}
+                      onClick={() => toggleChoraleRecorder(idx)}
+                      disabled={
+                        !(c.choraleFolderSelected && c.choraleWriteAccess) || c.choraleRecorderBusy
+                      }
+                      title={
+                        c.choraleFolderSelected && c.choraleWriteAccess
+                          ? c.choraleRecorderArmed
+                            ? 'Chorale is watching your Meet Recordings folder. Click to turn off.'
+                            : 'Turn on ingest of Meet recordings from your Drive folder.'
+                          : 'Configure a Google Drive folder with write access first'
+                      }
+                    >
+                      {c.choraleRecorderBusy
+                        ? 'Working…'
+                        : c.choraleRecorderArmed
+                        ? 'Recorder On — Turn Off'
+                        : 'Turn-on Recorder'}
+                    </button>
+                  </div>
+                  {c.choraleFolderSelected && c.choraleWriteAccess && (
+                    <div className="chorale-recorder-note" role="note">
+                      {c.choraleRecorderArmed ? (
+                        <>
+                          Watching <strong>{c.choraleFolderName ?? 'your folder'}</strong> for Google
+                          Meet recordings. When a host turns on recording in a call, Meet saves it here
+                          and Chorale sends it to Babelscribe to transcribe. Chorale can&apos;t start a
+                          Meet recording itself — a host must turn it on in the call.
+                        </>
+                      ) : (
+                        <>Recorder is off. Turn it on to auto-transcribe Meet recordings saved to your folder.</>
+                      )}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <>
@@ -1891,12 +1865,6 @@ function ConnectorsView({
       />
     )}
     {babelscribeOpen && <BabelscribeModal onClose={() => setBabelscribeOpen(false)} />}
-    {choraleRecordingIdx !== null && connectors[choraleRecordingIdx] && (
-      <ChoraleRecorderModal
-        folderName={connectors[choraleRecordingIdx].choraleFolderName ?? 'Selected folder'}
-        onClose={() => setChoraleRecordingIdx(null)}
-      />
-    )}
     {driveExplorerIdx !== null && connectors[driveExplorerIdx] && (
       <DriveExplorerModal
         card={connectors[driveExplorerIdx].key}

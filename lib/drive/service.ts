@@ -89,6 +89,21 @@ interface DriveSession {
    */
   grantedScope?: string
   selectedFolder?: SelectedFolder
+  /**
+   * Chorale "Turn-on Recorder" state. When armed, Chorale watches the selected
+   * Google Drive folder (the Meet Recordings folder) for new native Meet
+   * recordings and dispatches each to Babelscribe. Note: arming does NOT start
+   * or force any recording — Meet only writes an artifact when a host turns on
+   * recording in the call (eligible paid tiers). This flag only controls
+   * whether Chorale ingests those artifacts.
+   */
+  recorderArmed?: boolean
+  /**
+   * Drive file ids we've already dispatched to Babelscribe, so a repeated scan
+   * of the same folder doesn't re-transcribe the same recording. Capped to a
+   * sane recent window in scanRecordings() to bound growth.
+   */
+  seenRecordingIds?: string[]
 }
 
 /* ---------------------------------------------------------------------------
@@ -471,6 +486,182 @@ export async function listFolders(
 }
 
 /* ---------------------------------------------------------------------------
+ * Meet native-recording ingest
+ *
+ * Chorale doesn't record Meet calls itself. Instead, when Meet's native
+ * recording is turned on in a call (host action, eligible paid tier), Google
+ * writes the .mp4 (and optional transcript Doc) into the organizer's Drive
+ * under "Meet Recordings", typically in a per-meeting subfolder. Here we watch
+ * the folder the user configured and pick up NEW recording files so they can be
+ * dispatched to Babelscribe for transcription.
+ * ------------------------------------------------------------------------- */
+
+/** A recording-like file discovered under the watched folder. */
+export interface DriveRecordingFile {
+  id: string
+  name: string
+  mimeType: string
+  /** Drive createdTime (RFC 3339), used only for recency sorting. */
+  createdTime?: string
+  /** The folder id it was found in (the watched root or a per-meeting subfolder). */
+  parentId: string
+}
+
+/** Mime types Meet writes for a recording's media. We treat these as audio to
+ *  transcribe. (The transcript Doc, a Google Doc, is intentionally excluded —
+ *  Babelscribe works from the media.) */
+const RECORDING_MIME_TYPES = new Set([
+  'video/mp4',
+  'audio/mp4',
+  'audio/mpeg',
+  'audio/x-m4a',
+  'audio/m4a',
+  'audio/webm',
+  'video/webm',
+])
+
+/**
+ * List recording media files directly inside `parentId`. Non-folder, non-
+ * trashed files whose mimeType looks like recorded media. Shared-drive aware.
+ */
+async function listRecordingFilesIn(
+  accessToken: string,
+  parentId: string,
+): Promise<DriveRecordingFile[]> {
+  const files: DriveRecordingFile[] = []
+  let pageToken: string | undefined
+  let pages = 0
+  const MAX_PAGES = 10
+
+  do {
+    const url = new URL(`${DRIVE_API}/files`)
+    url.searchParams.set(
+      'q',
+      `'${parentId}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`,
+    )
+    url.searchParams.set('fields', 'files(id,name,mimeType,createdTime),nextPageToken')
+    url.searchParams.set('orderBy', 'createdTime desc')
+    url.searchParams.set('pageSize', '100')
+    url.searchParams.set('spaces', 'drive')
+    url.searchParams.set('supportsAllDrives', 'true')
+    url.searchParams.set('includeItemsFromAllDrives', 'true')
+    if (pageToken) url.searchParams.set('pageToken', pageToken)
+
+    const res = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      throw new Error(`Drive file list failed: ${res.status} ${detail}`)
+    }
+    const page = (await res.json()) as {
+      files?: { id: string; name: string; mimeType: string; createdTime?: string }[]
+      nextPageToken?: string
+    }
+    for (const f of page.files ?? []) {
+      if (RECORDING_MIME_TYPES.has(f.mimeType)) {
+        files.push({
+          id: f.id,
+          name: f.name,
+          mimeType: f.mimeType,
+          createdTime: f.createdTime,
+          parentId,
+        })
+      }
+    }
+    pageToken = page.nextPageToken
+    pages += 1
+    if (pages >= MAX_PAGES) break
+  } while (pageToken)
+
+  return files
+}
+
+/**
+ * Arm / disarm Chorale's recorder for a card. Arming only enables ingest — it
+ * does not (and cannot) start a Meet recording. Requires a connected session
+ * with a selected destination folder.
+ */
+export async function setRecorderArmed(
+  userEmail: string,
+  cardId: string,
+  armed: boolean,
+): Promise<void> {
+  const sess = await getSession(userEmail, cardId)
+  if (sess.state !== 'connected' || !sess.writeAccess) {
+    throw new Error('Connect Google Drive with write access first (Configure GDrive).')
+  }
+  if (armed && !sess.selectedFolder) {
+    throw new Error('Choose a Google Drive folder first (Configure GDrive).')
+  }
+  sess.recorderArmed = armed
+  await saveSession(userEmail, cardId, sess)
+}
+
+export interface ScanResult {
+  /** Recordings newly discovered on this scan (not seen before). */
+  newRecordings: DriveRecordingFile[]
+  /** Total recording media files currently visible under the watched tree. */
+  totalSeen: number
+  folderName: string | null
+}
+
+/**
+ * Scan the configured folder (and its immediate per-meeting subfolders, which
+ * is how Meet lays out "Meet Recordings/<meeting>/…") for recording media, and
+ * return the ones we haven't seen before. Marking-as-seen is the CALLER's job
+ * via markRecordingsDispatched(), so a scan that fails to dispatch doesn't lose
+ * the recording.
+ */
+export async function scanRecordings(userEmail: string, cardId: string): Promise<ScanResult> {
+  const sess = await getSession(userEmail, cardId)
+  if (sess.state !== 'connected' || !sess.writeAccess) {
+    throw new Error('Drive is not connected for this card')
+  }
+  if (!sess.selectedFolder) {
+    throw new Error('No folder selected for this card')
+  }
+  const accessToken = await ensureAccessToken(userEmail, cardId, sess)
+  const rootId = sess.selectedFolder.id
+
+  // Files directly in the watched folder + one level of subfolders (Meet's
+  // per-meeting folders). One level deep is enough for the standard layout and
+  // keeps the scan bounded.
+  const found: DriveRecordingFile[] = []
+  found.push(...(await listRecordingFilesIn(accessToken, rootId)))
+  const subfolders = await listFolders(userEmail, cardId, rootId)
+  for (const sub of subfolders) {
+    found.push(...(await listRecordingFilesIn(accessToken, sub.id)))
+  }
+
+  // Dedup by id (a file can't appear twice, but subfolder overlaps are cheap to
+  // guard against).
+  const byId = new Map<string, DriveRecordingFile>()
+  for (const f of found) byId.set(f.id, f)
+  const all = [...byId.values()]
+
+  const seen = new Set(sess.seenRecordingIds ?? [])
+  const newRecordings = all.filter((f) => !seen.has(f.id))
+
+  return { newRecordings, totalSeen: all.length, folderName: sess.selectedFolder.path }
+}
+
+/** Record that these recording ids have been handed to Babelscribe, so future
+ *  scans skip them. Keeps only the most recent 500 ids to bound growth. */
+export async function markRecordingsDispatched(
+  userEmail: string,
+  cardId: string,
+  ids: string[],
+): Promise<void> {
+  if (ids.length === 0) return
+  const sess = await getSession(userEmail, cardId)
+  const merged = [...(sess.seenRecordingIds ?? []), ...ids]
+  // De-dup, keep last 500.
+  sess.seenRecordingIds = [...new Set(merged)].slice(-500)
+  await saveSession(userEmail, cardId, sess)
+}
+
+/* ---------------------------------------------------------------------------
  * Selection / status / disconnect
  * ------------------------------------------------------------------------- */
 
@@ -624,6 +815,7 @@ export interface DriveStatus {
   writeAccess: boolean
   selectedFolder: SelectedFolder | null
   storeConfigured: boolean
+  recorderArmed: boolean
 }
 
 export async function status(userEmail: string, cardId: string): Promise<DriveStatus> {
@@ -634,6 +826,7 @@ export async function status(userEmail: string, cardId: string): Promise<DriveSt
     writeAccess: !!sess.writeAccess,
     selectedFolder: sess.selectedFolder ?? null,
     storeConfigured: REDIS_ENABLED,
+    recorderArmed: !!sess.recorderArmed,
   }
 }
 
