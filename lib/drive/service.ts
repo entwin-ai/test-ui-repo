@@ -95,12 +95,18 @@ function b64url(buf: Buffer): string {
 function b64urlDecode(s: string): Buffer {
   return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64')
 }
-function encodeState(userEmail: string, cardId: string): string {
-  const payload = b64url(Buffer.from(JSON.stringify({ userEmail, cardId, ts: Date.now() })))
+function encodeState(userEmail: string, cardId: string, pendingFolderUrl?: string): string {
+  const payload = b64url(
+    Buffer.from(JSON.stringify({ userEmail, cardId, pendingFolderUrl, ts: Date.now() })),
+  )
   const sig = b64url(crypto.createHmac('sha256', stateSecret()).update(payload).digest())
   return `${payload}.${sig}`
 }
-function decodeState(state: string): { userEmail: string; cardId: string } {
+function decodeState(state: string): {
+  userEmail: string
+  cardId: string
+  pendingFolderUrl?: string
+} {
   const [payload, sig] = state.split('.')
   if (!payload || !sig) throw new Error('Malformed OAuth state')
   const expected = crypto.createHmac('sha256', stateSecret()).update(payload).digest()
@@ -111,12 +117,13 @@ function decodeState(state: string): { userEmail: string; cardId: string } {
   const claims = JSON.parse(b64urlDecode(payload).toString('utf8')) as {
     userEmail: string
     cardId: string
+    pendingFolderUrl?: string
     ts: number
   }
   if (!claims.ts || Date.now() - claims.ts > STATE_TTL_MS) {
     throw new Error('OAuth state expired — please try connecting again')
   }
-  return { userEmail: claims.userEmail, cardId: claims.cardId }
+  return { userEmail: claims.userEmail, cardId: claims.cardId, pendingFolderUrl: claims.pendingFolderUrl }
 }
 
 /* ---- optional durable store (Upstash REST) -------------------------------- */
@@ -221,11 +228,15 @@ function redirectUri(): string {
  * the Chorale flow requires, so the user re-confirms which account and grants
  * write consent even if they've connected Gmail before.
  */
-export async function buildAuthUrl(userEmail: string, cardId: string): Promise<string> {
+export async function buildAuthUrl(
+  userEmail: string,
+  cardId: string,
+  pendingFolderUrl?: string,
+): Promise<string> {
   const clientId = process.env.GOOGLE_CLIENT_ID
   if (!clientId) throw new Error('GOOGLE_CLIENT_ID is not set')
 
-  const state = encodeState(userEmail, cardId)
+  const state = encodeState(userEmail, cardId, pendingFolderUrl)
 
   const sess = await getSession(userEmail, cardId)
   sess.state = 'authorizing'
@@ -250,7 +261,7 @@ export async function buildAuthUrl(userEmail: string, cardId: string): Promise<s
 export async function handleCallback(
   code: string,
   state: string,
-): Promise<{ userEmail: string; cardId: string }> {
+): Promise<{ userEmail: string; cardId: string; pendingFolderUrl?: string }> {
   const flow = decodeState(state)
 
   const clientId = process.env.GOOGLE_CLIENT_ID
@@ -305,7 +316,19 @@ export async function handleCallback(
   sess.writeAccess = grantedWrite
   await saveSession(flow.userEmail, flow.cardId, sess)
 
-  return { userEmail: flow.userEmail, cardId: flow.cardId }
+  // If the user kicked off this consent from the "Configure GDrive" URL modal,
+  // a folder URL rode along in the signed state. Now that we hold a write token,
+  // resolve + verify it and persist it as the Chorale destination so the user
+  // doesn't have to re-enter it after returning from Google.
+  if (flow.pendingFolderUrl && grantedWrite) {
+    try {
+      await selectFolderByUrl(flow.userEmail, flow.cardId, flow.pendingFolderUrl)
+    } catch {
+      /* Non-fatal: the UI will surface the error and let them retry the URL. */
+    }
+  }
+
+  return { userEmail: flow.userEmail, cardId: flow.cardId, pendingFolderUrl: flow.pendingFolderUrl }
 }
 
 async function ensureAccessToken(
@@ -416,6 +439,130 @@ export async function selectFolder(
   if (sess.state !== 'connected') throw new Error('Drive is not connected for this card')
   sess.selectedFolder = folder
   await saveSession(userEmail, cardId, sess)
+}
+
+/**
+ * Pull a Drive folder id out of a share URL the user pastes. Handles the common
+ * shapes:
+ *   - https://drive.google.com/drive/folders/<ID>?usp=sharing
+ *   - https://drive.google.com/drive/u/0/folders/<ID>
+ *   - https://drive.google.com/open?id=<ID>
+ *   - https://drive.google.com/drive/folders/<ID>/…
+ *   - a bare folder id
+ * Shared-drive root URLs (…/drive/folders/<driveId>) and shared-drive item URLs
+ * both carry an id here and are resolved the same way.
+ */
+export function parseFolderIdFromUrl(input: string): string | null {
+  const raw = (input || '').trim()
+  if (!raw) return null
+
+  // Bare id (Drive ids are URL-safe base64-ish, typically 19–44 chars).
+  if (/^[a-zA-Z0-9_-]{10,}$/.test(raw)) return raw
+
+  // …/folders/<ID>
+  const folders = raw.match(/\/folders\/([a-zA-Z0-9_-]{10,})/)
+  if (folders) return folders[1]
+
+  // …?id=<ID> or …&id=<ID>
+  const idParam = raw.match(/[?&]id=([a-zA-Z0-9_-]{10,})/)
+  if (idParam) return idParam[1]
+
+  // …/d/<ID>/… (some copied links use the /d/ shape)
+  const dShape = raw.match(/\/d\/([a-zA-Z0-9_-]{10,})/)
+  if (dShape) return dShape[1]
+
+  return null
+}
+
+/**
+ * Fetch a folder's metadata (name + capabilities) so we can (a) confirm the id
+ * really points to a folder Entwin can see, and (b) confirm Entwin has WRITE
+ * access — Google reports this as capabilities.canAddChildren, i.e. whether the
+ * app can create files inside it. Works for both My Drive and shared-drive
+ * folders (supportsAllDrives=true).
+ */
+async function fetchFolderMeta(
+  accessToken: string,
+  folderId: string,
+): Promise<{ id: string; name: string; mimeType: string; canAddChildren: boolean }> {
+  const url = new URL(`${DRIVE_API}/files/${encodeURIComponent(folderId)}`)
+  url.searchParams.set('fields', 'id,name,mimeType,capabilities(canAddChildren)')
+  url.searchParams.set('supportsAllDrives', 'true')
+
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  if (res.status === 404) {
+    throw new Error(
+      'That folder is not visible to Entwin. Share it with the connected Google account (Editor access) and try again.',
+    )
+  }
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(`Could not read that Drive folder: ${res.status} ${detail}`)
+  }
+  const f = (await res.json()) as {
+    id: string
+    name: string
+    mimeType: string
+    capabilities?: { canAddChildren?: boolean }
+  }
+  return {
+    id: f.id,
+    name: f.name,
+    mimeType: f.mimeType,
+    canAddChildren: !!f.capabilities?.canAddChildren,
+  }
+}
+
+export interface SelectByUrlResult {
+  /** True when there is no connected Drive token yet — caller should run OAuth. */
+  needsAuth: boolean
+  selectedFolder?: SelectedFolder
+}
+
+/**
+ * Resolve a pasted Google Drive folder URL to a concrete folder, verify Entwin
+ * has WRITE access to it, and persist it as the Chorale destination.
+ *
+ * If the card has no connected Drive token yet, this returns { needsAuth: true }
+ * WITHOUT throwing, so the caller can hand the user off to the Google consent
+ * flow (carrying the URL through, so we re-resolve it automatically on return).
+ */
+export async function selectFolderByUrl(
+  userEmail: string,
+  cardId: string,
+  folderUrl: string,
+): Promise<SelectByUrlResult> {
+  const folderId = parseFolderIdFromUrl(folderUrl)
+  if (!folderId) {
+    throw new Error(
+      'That does not look like a Google Drive folder link. Paste a URL like https://drive.google.com/drive/folders/FOLDER_ID',
+    )
+  }
+
+  const sess = await getSession(userEmail, cardId)
+  if (sess.state !== 'connected' || !sess.writeAccess) {
+    // No usable write token yet — tell the caller to authorize first.
+    return { needsAuth: true }
+  }
+
+  const accessToken = await ensureAccessToken(userEmail, cardId, sess)
+  const meta = await fetchFolderMeta(accessToken, folderId)
+
+  if (meta.mimeType !== 'application/vnd.google-apps.folder') {
+    throw new Error('That link points to a file, not a folder. Paste a link to a Drive folder.')
+  }
+  if (!meta.canAddChildren) {
+    throw new Error(
+      `Entwin can see “${meta.name}” but cannot write to it. Give the connected Google account Editor access to the shared folder, then try again.`,
+    )
+  }
+
+  const folder: SelectedFolder = { id: meta.id, name: meta.name, path: meta.name }
+  sess.selectedFolder = folder
+  await saveSession(userEmail, cardId, sess)
+  return { needsAuth: false, selectedFolder: folder }
 }
 
 export interface DriveStatus {

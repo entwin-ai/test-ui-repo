@@ -19,9 +19,13 @@ export async function GET(req: NextRequest) {
   if (!isDriveCard(card)) {
     return NextResponse.json({ error: 'Invalid or missing card id' }, { status: 400 })
   }
+  // Optional: a Drive folder URL the user pasted in the Configure GDrive modal.
+  // It rides through the signed OAuth state so we can auto-save it on return
+  // once a write token exists.
+  const folderUrl = req.nextUrl.searchParams.get('folderUrl') || undefined
 
   try {
-    const url = await buildAuthUrl(auth.email, card)
+    const url = await buildAuthUrl(auth.email, card, folderUrl)
     return NextResponse.redirect(url)
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 500 })

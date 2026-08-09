@@ -24,8 +24,12 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const { cardId } = await handleCallback(code, state)
-    return NextResponse.redirect(`${base}/?drive=connected&card=${cardId}`)
+    const { cardId, pendingFolderUrl } = await handleCallback(code, state)
+    // If the user came from the "Configure GDrive" URL modal, the folder was
+    // already resolved + saved during the token exchange — tell the UI to just
+    // hydrate the card (drive=saved) instead of opening the folder explorer.
+    const outcome = pendingFolderUrl ? 'saved' : 'connected'
+    return NextResponse.redirect(`${base}/?drive=${outcome}&card=${cardId}`)
   } catch (e) {
     const reason = encodeURIComponent((e as Error).message || 'callback failed')
     return NextResponse.redirect(`${base}/?drive=error&reason=${reason}`)

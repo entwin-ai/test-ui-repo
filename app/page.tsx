@@ -757,6 +757,153 @@ function BabelscribeModal({ onClose }: { onClose: () => void }) {
   )
 }
 
+/* ---------------- Chorale "Configure GDrive" (URL) modal ---------------- */
+
+type ChoraleUrlPhase = 'input' | 'saving' | 'redirecting' | 'saved' | 'error'
+
+/**
+ * Collects a Google Drive folder URL for Chorale's write destination and saves
+ * it. The folder should be a (shared-drive) folder that Entwin has write access
+ * to. On submit we POST the URL to /api/drive/select-url:
+ *   - { ok: true }        -> folder resolved, write access verified, saved.
+ *   - { needsAuth: true } -> no Drive write token yet; hand off to Google's
+ *                            consent screen, carrying the URL so it's saved on
+ *                            return (?drive=saved).
+ *   - { error }           -> surfaced inline (bad link / no write access / etc).
+ */
+function ChoraleDriveUrlModal({
+  card,
+  currentFolderName,
+  onSaved,
+  onClose,
+}: {
+  card: string
+  currentFolderName: string | null
+  onSaved: (folder: { id: string; name: string; path: string }) => void
+  onClose: () => void
+}) {
+  const [phase, setPhase] = useState<ChoraleUrlPhase>('input')
+  const [url, setUrl] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  // Light client-side check so the button enables only for something folder-like.
+  const looksValid =
+    /\/folders\/[a-zA-Z0-9_-]{10,}/.test(url) ||
+    /[?&]id=[a-zA-Z0-9_-]{10,}/.test(url) ||
+    /\/d\/[a-zA-Z0-9_-]{10,}/.test(url) ||
+    /^[a-zA-Z0-9_-]{10,}$/.test(url.trim())
+
+  const submit = async () => {
+    if (!looksValid) {
+      setError(
+        'Paste a Google Drive folder link, e.g. https://drive.google.com/drive/folders/FOLDER_ID',
+      )
+      return
+    }
+    setError(null)
+    setPhase('saving')
+    try {
+      const res = await fetch('/api/drive/select-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ card, folderUrl: url.trim() }),
+      })
+      const raw = await res.text()
+      let payload: any = {}
+      try {
+        payload = raw ? JSON.parse(raw) : {}
+      } catch {
+        /* ignore */
+      }
+
+      if (res.ok && payload.needsAuth) {
+        // No write token yet — hand off to Google consent, carrying the URL so
+        // the same folder is auto-saved when we come back (?drive=saved).
+        setPhase('redirecting')
+        window.location.href = `/api/drive/authorize?card=${encodeURIComponent(
+          card,
+        )}&folderUrl=${encodeURIComponent(url.trim())}`
+        return
+      }
+
+      if (!res.ok) throw new Error(payload.error || `Request failed (${res.status})`)
+
+      const folder = payload.selectedFolder as { id: string; name: string; path: string } | undefined
+      if (!folder) throw new Error('The folder could not be saved. Please try again.')
+      setPhase('saved')
+      onSaved(folder)
+    } catch (e) {
+      setError((e as Error).message)
+      setPhase('error')
+    }
+  }
+
+  const busy = phase === 'saving' || phase === 'redirecting'
+
+  return (
+    <div
+      className="wa-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Chorale — configure Google Drive folder"
+    >
+      <div className="wa-window">
+        <div className="wa-head">
+          <div className="wa-badge" style={{ background: '#20325A' }}>
+            <img src="/chorale-icon.png" alt="" width={20} height={20} style={{ display: 'block' }} />
+          </div>
+          <div className="wa-head-title">Chorale — Configure GDrive</div>
+          <button className="wa-close" aria-label="Close" onClick={onClose} disabled={busy}>
+            ×
+          </button>
+        </div>
+
+        <div className="wa-body">
+          <p className="wa-lead">
+            Paste a Google Drive URL for the folder where Chorale should save recordings. Use a{' '}
+            <strong>shared-drive folder that Entwin has write (Editor) access to</strong>. We&apos;ll
+            verify write access and save this folder as the recording destination.
+          </p>
+          {currentFolderName && (
+            <p className="wa-fineprint" style={{ marginTop: 0 }}>
+              Current destination: <strong>{currentFolderName}</strong>
+            </p>
+          )}
+          <label className="wa-label" htmlFor="chorale-drive-url">
+            Google Drive folder URL
+          </label>
+          <input
+            id="chorale-drive-url"
+            className="wa-input"
+            type="text"
+            autoFocus
+            placeholder="https://drive.google.com/drive/folders/FOLDER_ID?usp=sharing"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && looksValid && !busy) submit()
+            }}
+            disabled={busy}
+          />
+          {error && <div className="wa-error">{error}</div>}
+          <div className="wa-actions">
+            <button className="wa-btn ghost" onClick={onClose} disabled={busy}>
+              Cancel
+            </button>
+            <button className="wa-btn primary" onClick={submit} disabled={!looksValid || busy}>
+              {phase === 'saving'
+                ? 'Saving…'
+                : phase === 'redirecting'
+                ? 'Redirecting to Google…'
+                : 'Save folder'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /* ---------------- Chorale recorder modal ---------------- */
 
 // Lightweight in-browser voice recorder. Reached only after a Google Drive
@@ -1160,6 +1307,8 @@ function ConnectorsView({
   // Index of the connector whose Drive folder-explorer modal is open, or null.
   // Opened after the Drive write-access consent returns (?drive=connected).
   const [driveExplorerIdx, setDriveExplorerIdx] = useState<number | null>(null)
+  // Index of the connector whose "Configure GDrive" URL modal is open, or null.
+  const [choraleDriveUrlIdx, setChoraleDriveUrlIdx] = useState<number | null>(null)
   // Notice shown when the Drive consent is cancelled or errors out.
   const [driveNotice, setDriveNotice] = useState<string | null>(null)
 
@@ -1181,23 +1330,37 @@ function ConnectorsView({
     }
   }, [])
 
-  // Chorale — "Configure GDrive": always enabled. This kicks off the real
-  // Google flow to (re)validate the user's Google account and grant Drive WRITE
-  // (drive.file) access, then — on return — opens the Drive Explorer so the user
-  // can pick a destination folder.
-  //
-  // Step 1 (here): navigate the browser to /api/drive/authorize, which redirects
-  //   to Google's account chooser + consent screen (prompt=select_account
-  //   consent, so authentication is always re-validated for write access).
-  // Step 2 (on return, ?drive=connected): the effect below opens the Drive
-  //   Explorer modal (DriveExplorerModal) for folder selection.
-  // Step 3 (in the modal): selecting a folder persists it and closes the popup.
+  // Chorale — "Configure GDrive": opens a small modal where the user pastes a
+  // Google Drive URL pointing to a (shared-drive) folder that Entwin should have
+  // WRITE access to. On submit we POST the URL to /api/drive/select-url, which
+  // resolves the folder id, verifies write access, and SAVES it as the Chorale
+  // destination. If Entwin doesn't hold a Drive write token for this card yet,
+  // that endpoint replies { needsAuth: true } and the modal hands the user off
+  // to Google's consent screen — carrying the URL through so it's saved
+  // automatically on return.
   const configureChoraleDrive = (idx: number) => {
-    const c = connectors[idx]
-    // Full-page handoff to Google (same pattern as Gmail/Slack connect). The
-    // browser follows the 302 to accounts.google.com; we come back to the app
-    // with ?drive=connected&card=... once consent is granted.
-    window.location.href = `/api/drive/authorize?card=${encodeURIComponent(c.key)}`
+    setChoraleDriveUrlIdx(idx)
+  }
+
+  // When the URL modal saves a folder, stamp it onto the card.
+  const onChoraleFolderSavedFromUrl = (
+    idx: number,
+    folder: { id: string; name: string; path: string },
+  ) => {
+    setConnectors((prev) =>
+      prev.map((x, i) =>
+        i === idx
+          ? {
+              ...x,
+              choraleFolderSelected: true,
+              choraleWriteAccess: true,
+              choraleFolderId: folder.id,
+              choraleFolderName: folder.path || folder.name,
+            }
+          : x,
+      ),
+    )
+    setChoraleDriveUrlIdx(null)
   }
 
   // Chorale — "Start Recording": only reachable when a Drive folder is selected
@@ -1260,7 +1423,52 @@ function ConnectorsView({
     const drive = params.get('drive')
     if (!drive) return
 
-    if (drive === 'connected') {
+    if (drive === 'saved') {
+      // The user configured the folder via the "Configure GDrive" URL modal and
+      // it was auto-saved during the OAuth return. Pull the persisted folder
+      // from the server so the card reflects it — no explorer needed.
+      const idx = connectors.findIndex((c) => c.key === 'chorale-recorder')
+      if (idx >= 0) {
+        ;(async () => {
+          try {
+            const res = await fetch('/api/drive/status?card=chorale-recorder')
+            if (!res.ok) return
+            const d = (await res.json()) as {
+              state?: string
+              connectedEmail?: string | null
+              writeAccess?: boolean
+              selectedFolder?: { id: string; name: string; path: string } | null
+            }
+            const connected = d.state === 'connected'
+            setConnectors((prev) =>
+              prev.map((x) =>
+                x.key === 'chorale-recorder'
+                  ? {
+                      ...x,
+                      choraleWriteAccess: connected && !!d.writeAccess,
+                      choraleFolderSelected: connected && !!d.selectedFolder,
+                      choraleFolderId: d.selectedFolder?.id ?? x.choraleFolderId ?? null,
+                      choraleFolderName:
+                        d.selectedFolder?.path ??
+                        d.selectedFolder?.name ??
+                        x.choraleFolderName ??
+                        null,
+                      connectedEmail: d.connectedEmail ?? x.connectedEmail ?? null,
+                    }
+                  : x,
+              ),
+            )
+            if (!(connected && d.selectedFolder)) {
+              setDriveNotice(
+                'Google access was granted, but the folder could not be saved. Open “Configure GDrive” and re-paste the folder link.',
+              )
+            }
+          } catch {
+            /* best-effort */
+          }
+        })()
+      }
+    } else if (drive === 'connected') {
       const idx = connectors.findIndex((c) => c.key === 'chorale-recorder')
       if (idx >= 0) {
         // Mark write access granted; folder selection completes in the modal.
@@ -1680,6 +1888,14 @@ function ConnectorsView({
         connectedEmail={connectors[driveExplorerIdx].connectedEmail}
         onSelect={(folder) => onDriveFolderSelected(driveExplorerIdx, folder)}
         onClose={() => setDriveExplorerIdx(null)}
+      />
+    )}
+    {choraleDriveUrlIdx !== null && connectors[choraleDriveUrlIdx] && (
+      <ChoraleDriveUrlModal
+        card={connectors[choraleDriveUrlIdx].key}
+        currentFolderName={connectors[choraleDriveUrlIdx].choraleFolderName ?? null}
+        onSaved={(folder) => onChoraleFolderSavedFromUrl(choraleDriveUrlIdx, folder)}
+        onClose={() => setChoraleDriveUrlIdx(null)}
       />
     )}
     {settingsIdx !== null && connectors[settingsIdx] && (
