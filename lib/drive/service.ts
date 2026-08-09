@@ -677,6 +677,75 @@ export async function selectFolder(
   await saveSession(userEmail, cardId, sess)
 }
 
+export interface UploadedFile {
+  id: string
+  name: string
+  webViewLink?: string
+}
+
+/**
+ * Upload recorded audio (bytes) into the card's selected Drive folder using the
+ * granted write token. Multipart upload: a small JSON metadata part (name +
+ * parent folder) followed by the media bytes. Shared-drive aware.
+ *
+ * Used by Chorale's in-browser recorder to persist a finished recording to the
+ * user's configured folder. Requires a connected session with write access and
+ * a selected folder.
+ */
+export async function uploadRecordingToSelectedFolder(
+  userEmail: string,
+  cardId: string,
+  file: { name: string; mimeType: string; bytes: Buffer },
+): Promise<UploadedFile> {
+  const sess = await getSession(userEmail, cardId)
+  if (sess.state !== 'connected' || !sess.writeAccess) {
+    throw new Error('Drive is not connected with write access for this card')
+  }
+  if (!sess.selectedFolder) {
+    throw new Error('No destination folder selected (Configure GDrive first)')
+  }
+  const accessToken = await ensureAccessToken(userEmail, cardId, sess)
+
+  const boundary = `entwin${crypto.randomBytes(12).toString('hex')}`
+  const metadata = {
+    name: file.name,
+    parents: [sess.selectedFolder.id],
+  }
+
+  // Build a multipart/related body by hand: metadata part + media part.
+  const preamble = Buffer.from(
+    `--${boundary}\r\n` +
+      `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+      `${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Type: ${file.mimeType}\r\n\r\n`,
+    'utf8',
+  )
+  const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8')
+  const body = Buffer.concat([preamble, file.bytes, epilogue])
+
+  const url = new URL('https://www.googleapis.com/upload/drive/v3/files')
+  url.searchParams.set('uploadType', 'multipart')
+  url.searchParams.set('supportsAllDrives', 'true')
+  url.searchParams.set('fields', 'id,name,webViewLink')
+
+  const res = await fetch(url.toString(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': `multipart/related; boundary=${boundary}`,
+      'Content-Length': String(body.length),
+    },
+    body,
+  })
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(`Drive upload failed: ${res.status} ${detail}`)
+  }
+  const f = (await res.json()) as { id: string; name: string; webViewLink?: string }
+  return { id: f.id, name: f.name, webViewLink: f.webViewLink }
+}
+
 /**
  * Pull a Drive folder id out of a share URL the user pastes. Handles the common
  * shapes:

@@ -910,6 +910,340 @@ function ChoraleDriveUrlModal({
   )
 }
 
+/* ---------------- Chorale recorder modal (system/tab audio) ---------------- */
+
+type RecPhase = 'idle' | 'recording' | 'recorded' | 'uploading' | 'uploaded' | 'error'
+
+function mmss(total: number): string {
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+/**
+ * In-browser recorder that captures computer/tab audio via the browser's
+ * screen-share picker (getDisplayMedia), lets the user start/stop, upload the
+ * result into the configured Google Drive folder, and download it locally.
+ *
+ * Browser reality: a web page can't silently capture all system audio — the
+ * browser MUST show its share picker and the user must tick "share audio". On
+ * Chrome, choosing a TAB with "share tab audio" captures that tab's audio (e.g.
+ * a Meet call = all participants). Choosing "Entire screen" can capture full
+ * system audio on Windows; macOS restricts system-audio capture. If the user's
+ * mic should also be captured, we mix it in when available.
+ */
+function ChoraleRecorderModal({
+  card,
+  folderName,
+  onClose,
+}: {
+  card: string
+  folderName: string
+  onClose: () => void
+}) {
+  const [phase, setPhase] = useState<RecPhase>('idle')
+  const [error, setError] = useState<string | null>(null)
+  const [elapsed, setElapsed] = useState(0)
+  const [audioUrl, setAudioUrl] = useState<string | null>(null)
+  const [includeMic, setIncludeMic] = useState(true)
+  const [uploadedLink, setUploadedLink] = useState<string | null>(null)
+
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const chunksRef = useRef<BlobPart[]>([])
+  const blobRef = useRef<Blob | null>(null)
+  const streamsRef = useRef<MediaStream[]>([])
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const fileName = useRef<string>('')
+
+  const stopTimer = () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current)
+      timerRef.current = null
+    }
+  }
+
+  const cleanupStreams = () => {
+    streamsRef.current.forEach((s) => s.getTracks().forEach((t) => t.stop()))
+    streamsRef.current = []
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {})
+      audioCtxRef.current = null
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      stopTimer()
+      if (recorderRef.current && recorderRef.current.state !== 'inactive') {
+        recorderRef.current.stop()
+      }
+      cleanupStreams()
+      if (audioUrl) URL.revokeObjectURL(audioUrl)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const pickMime = (): string => {
+    const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']
+    for (const c of candidates) {
+      if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(c)) return c
+    }
+    return 'audio/webm'
+  }
+
+  const start = async () => {
+    setError(null)
+    setUploadedLink(null)
+    try {
+      // System/tab audio via the screen-share picker. We only need audio, but
+      // the API requires requesting video too; we stop the video track right
+      // away and keep only audio.
+      const display = await (navigator.mediaDevices as MediaDevices).getDisplayMedia({
+        video: true,
+        audio: true,
+      })
+      streamsRef.current.push(display)
+      const displayAudio = display.getAudioTracks()
+      // Drop the video track — we're recording audio only.
+      display.getVideoTracks().forEach((t) => t.stop())
+
+      if (displayAudio.length === 0) {
+        cleanupStreams()
+        setError(
+          'No audio was shared. Re-open the picker and enable “Share tab audio” (or pick “Entire screen” with system audio).',
+        )
+        setPhase('error')
+        return
+      }
+
+      // Optionally mix in the mic so the user's own voice is captured too.
+      let micStream: MediaStream | null = null
+      if (includeMic) {
+        try {
+          micStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+          streamsRef.current.push(micStream)
+        } catch {
+          // Mic denied/unavailable — proceed with system audio only.
+          micStream = null
+        }
+      }
+
+      // Build the stream to record. If we have both display + mic, mix them via
+      // Web Audio into a single destination; otherwise record display audio.
+      let recordStream: MediaStream
+      if (micStream) {
+        const ctx = new AudioContext()
+        audioCtxRef.current = ctx
+        const dest = ctx.createMediaStreamDestination()
+        ctx.createMediaStreamSource(new MediaStream(displayAudio)).connect(dest)
+        ctx.createMediaStreamSource(micStream).connect(dest)
+        recordStream = dest.stream
+      } else {
+        recordStream = new MediaStream(displayAudio)
+      }
+
+      const mimeType = pickMime()
+      const mr = new MediaRecorder(recordStream, { mimeType })
+      chunksRef.current = []
+      mr.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data)
+      }
+      mr.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: mimeType })
+        blobRef.current = blob
+        setAudioUrl(URL.createObjectURL(blob))
+        cleanupStreams()
+        setPhase('recorded')
+      }
+      // If the user stops sharing via the browser's own "Stop sharing" UI, end.
+      displayAudio[0].addEventListener('ended', () => {
+        if (recorderRef.current && recorderRef.current.state !== 'inactive') {
+          recorderRef.current.stop()
+        }
+        stopTimer()
+      })
+
+      recorderRef.current = mr
+      fileName.current = `chorale-${new Date().toISOString().replace(/[:.]/g, '-')}.webm`
+      mr.start()
+      setElapsed(0)
+      timerRef.current = setInterval(() => setElapsed((s) => s + 1), 1000)
+      setPhase('recording')
+    } catch (e) {
+      cleanupStreams()
+      const msg = (e as Error).message || 'Screen/audio capture was denied.'
+      setError(msg)
+      setPhase('error')
+    }
+  }
+
+  const stop = () => {
+    stopTimer()
+    if (recorderRef.current && recorderRef.current.state !== 'inactive') {
+      recorderRef.current.stop()
+    }
+  }
+
+  const uploadToDrive = async () => {
+    if (!blobRef.current) return
+    setError(null)
+    setPhase('uploading')
+    try {
+      const fd = new FormData()
+      fd.append('card', card)
+      fd.append('name', fileName.current || 'chorale-recording.webm')
+      fd.append('file', blobRef.current, fileName.current || 'chorale-recording.webm')
+      const res = await fetch('/api/drive/upload-recording', { method: 'POST', body: fd })
+      const raw = await res.text()
+      let payload: any = {}
+      try {
+        payload = raw ? JSON.parse(raw) : {}
+      } catch {
+        /* ignore */
+      }
+      if (!res.ok) throw new Error(payload.error || `Upload failed (${res.status})`)
+      setUploadedLink(payload.file?.webViewLink ?? null)
+      setPhase('uploaded')
+    } catch (e) {
+      setError((e as Error).message)
+      setPhase('recorded')
+    }
+  }
+
+  const reset = () => {
+    if (audioUrl) URL.revokeObjectURL(audioUrl)
+    setAudioUrl(null)
+    blobRef.current = null
+    chunksRef.current = []
+    setElapsed(0)
+    setUploadedLink(null)
+    setError(null)
+    setPhase('idle')
+  }
+
+  const recording = phase === 'recording'
+  const busy = phase === 'uploading'
+
+  return (
+    <div className="wa-overlay" role="dialog" aria-modal="true" aria-label="Chorale — recorder">
+      <div className="wa-window">
+        <div className="wa-head">
+          <div className="wa-badge" style={{ background: '#20325A' }}>
+            <img src="/chorale-icon.png" alt="" width={20} height={20} style={{ display: 'block' }} />
+          </div>
+          <div className="wa-head-title">Chorale — Recorder</div>
+          <button className="wa-close" aria-label="Close" onClick={onClose} disabled={recording || busy}>
+            ×
+          </button>
+        </div>
+
+        <div className="wa-body">
+          <p className="wa-lead">
+            Records your computer/tab audio and saves it to <strong>{folderName}</strong>. When you
+            start, your browser asks which screen or tab to share — pick the meeting tab and enable
+            <strong> “Share tab audio”</strong> to capture all participants. (Browsers require this
+            picker; audio can’t be captured silently.)
+          </p>
+
+          <div className="chorale-recorder-stage">
+            <div className={`chorale-pulse ${recording ? 'live' : ''}`} aria-hidden="true" />
+            <div className="chorale-timer">{mmss(elapsed)}</div>
+            <div className="chorale-state">
+              {phase === 'idle' && 'Ready'}
+              {phase === 'recording' && 'Recording…'}
+              {phase === 'recorded' && 'Recorded'}
+              {phase === 'uploading' && 'Uploading to Drive…'}
+              {phase === 'uploaded' && 'Saved to Drive'}
+              {phase === 'error' && 'Error'}
+            </div>
+          </div>
+
+          {phase === 'idle' && (
+            <label className="chorale-mic-opt">
+              <input
+                type="checkbox"
+                checked={includeMic}
+                onChange={(e) => setIncludeMic(e.target.checked)}
+              />
+              Also record my microphone (mix my voice in)
+            </label>
+          )}
+
+          {audioUrl && (phase === 'recorded' || phase === 'uploaded' || phase === 'uploading') && (
+            <audio className="chorale-audio" src={audioUrl} controls />
+          )}
+
+          {error && <div className="wa-error">{error}</div>}
+
+          {uploadedLink && (
+            <a className="wa-link" href={uploadedLink} target="_blank" rel="noreferrer">
+              Open the recording in Google Drive ↗
+            </a>
+          )}
+
+          <div className="wa-actions">
+            {phase === 'idle' && (
+              <>
+                <button className="wa-btn ghost" onClick={onClose}>
+                  Cancel
+                </button>
+                <button className="wa-btn primary" onClick={start}>
+                  Start recording
+                </button>
+              </>
+            )}
+
+            {phase === 'recording' && (
+              <button className="wa-btn primary" onClick={stop}>
+                Stop recording
+              </button>
+            )}
+
+            {(phase === 'recorded' || phase === 'uploading' || phase === 'uploaded') && (
+              <>
+                <button className="wa-btn ghost" onClick={reset} disabled={busy}>
+                  New recording
+                </button>
+                {audioUrl && (
+                  <a
+                    className="wa-btn ghost"
+                    href={audioUrl}
+                    download={fileName.current || 'chorale-recording.webm'}
+                  >
+                    Download
+                  </a>
+                )}
+                {phase !== 'uploaded' && (
+                  <button className="wa-btn primary" onClick={uploadToDrive} disabled={busy}>
+                    {busy ? 'Uploading…' : 'Save to Drive'}
+                  </button>
+                )}
+                {phase === 'uploaded' && (
+                  <button className="wa-btn primary" onClick={onClose}>
+                    Done
+                  </button>
+                )}
+              </>
+            )}
+
+            {phase === 'error' && (
+              <>
+                <button className="wa-btn ghost" onClick={onClose}>
+                  Close
+                </button>
+                <button className="wa-btn primary" onClick={reset}>
+                  Try again
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /* ---------------- Google Drive folder explorer ---------------- */
 
 interface DriveExplorerFolder {
@@ -1168,6 +1502,8 @@ function ConnectorsView({
   // Index of the connector whose Drive folder-explorer modal is open, or null.
   // Opened after the Drive write-access consent returns (?drive=connected).
   const [driveExplorerIdx, setDriveExplorerIdx] = useState<number | null>(null)
+  // Index of the connector whose in-browser recorder popup is open, or null.
+  const [choraleRecorderIdx, setChoraleRecorderIdx] = useState<number | null>(null)
   // Index of the connector whose "Configure GDrive" URL modal is open, or null.
   const [choraleDriveUrlIdx, setChoraleDriveUrlIdx] = useState<number | null>(null)
   // Notice shown when the Drive consent is cancelled or errors out.
@@ -1224,98 +1560,16 @@ function ConnectorsView({
     setChoraleDriveUrlIdx(null)
   }
 
-  // Chorale — "Turn-on Recorder": arms (or disarms) native-recording ingest.
-  // Only reachable when a Drive folder is selected and write access granted.
-  // Arming enables Chorale to watch the configured Meet Recordings folder and
-  // hand new Meet recordings to Babelscribe; it does NOT start a Meet recording.
-  const toggleChoraleRecorder = async (idx: number) => {
+  // Chorale — "Turn-on Recorder": opens the in-browser recorder popup. The
+  // recorder captures tab/system audio via the browser's screen-share picker,
+  // lets the user start/stop, upload the result to the configured Drive folder,
+  // and download it locally. Only reachable once a folder is selected and write
+  // access granted (so the upload has a destination).
+  const openChoraleRecorder = (idx: number) => {
     const c = connectors[idx]
     if (!(c.choraleFolderSelected && c.choraleWriteAccess)) return
-    if (c.choraleRecorderBusy) return
-    const next = !c.choraleRecorderArmed
-
-    setConnectors((prev) =>
-      prev.map((x, i) => (i === idx ? { ...x, choraleRecorderBusy: true } : x)),
-    )
-    try {
-      const res = await fetch('/api/drive/recorder', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ card: c.key, armed: next }),
-      })
-      const raw = await res.text()
-      let payload: any = {}
-      try {
-        payload = raw ? JSON.parse(raw) : {}
-      } catch {
-        /* ignore */
-      }
-      if (!res.ok) throw new Error(payload.error || `Request failed (${res.status})`)
-      const armed = !!payload.recorderArmed
-      setConnectors((prev) =>
-        prev.map((x, i) =>
-          i === idx ? { ...x, choraleRecorderArmed: armed, choraleRecorderBusy: false } : x,
-        ),
-      )
-    } catch (e) {
-      setConnectors((prev) =>
-        prev.map((x, i) => (i === idx ? { ...x, choraleRecorderBusy: false } : x)),
-      )
-      setDriveNotice((e as Error).message)
-    }
+    setChoraleRecorderIdx(idx)
   }
-
-  // Scan the configured folder for new Meet recordings and dispatch them to
-  // Babelscribe. Used both by an armed auto-poll (below) and could back a manual
-  // "check now" affordance. Surfaces a concise result via the Drive notice.
-  const scanChoraleRecordings = async (cardKey: string, announce: boolean) => {
-    try {
-      const res = await fetch('/api/drive/scan-recordings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ card: cardKey }),
-      })
-      if (!res.ok) return
-      const d = (await res.json()) as {
-        ok?: boolean
-        skipped?: boolean
-        dispatched?: number
-        failed?: number
-      }
-      if (d.skipped) return
-      if (announce && (d.dispatched ?? 0) > 0) {
-        setDriveNotice(
-          `Found ${d.dispatched} new Meet recording${d.dispatched === 1 ? '' : 's'} — sent to Babelscribe to transcribe.`,
-        )
-      }
-    } catch {
-      /* best-effort; a failed scan retries on the next poll */
-    }
-  }
-
-  // While the recorder is armed AND the app is open, poll the configured folder
-  // periodically so recordings Meet writes are picked up without user action.
-  // (A true server-side cron would need the Drive tokens in the DB; today the
-  // Drive session lives in the app, so ingest runs while a tab is open. The
-  // scan is idempotent — already-dispatched files are skipped.)
-  useEffect(() => {
-    const chorale = connectors.find((c) => c.key === 'chorale-recorder')
-    if (!chorale?.choraleRecorderArmed) return
-    let cancelled = false
-    // Kick once shortly after arming/mount, then every 5 minutes.
-    const first = setTimeout(() => {
-      if (!cancelled) scanChoraleRecordings('chorale-recorder', true)
-    }, 4000)
-    const iv = setInterval(() => {
-      if (!cancelled) scanChoraleRecordings('chorale-recorder', true)
-    }, 5 * 60 * 1000)
-    return () => {
-      cancelled = true
-      clearTimeout(first)
-      clearInterval(iv)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connectors.find((c) => c.key === 'chorale-recorder')?.choraleRecorderArmed])
 
   // On mount, hydrate the Chorale card from its server-side Drive session so a
   // previously granted write scope and chosen folder survive a page refresh
@@ -1776,38 +2030,24 @@ function ConnectorsView({
                     </button>
                     <button
                       type="button"
-                      className={`connect-toggle chorale-record ${c.choraleRecorderArmed ? 'connected' : ''}`}
-                      onClick={() => toggleChoraleRecorder(idx)}
-                      disabled={
-                        !(c.choraleFolderSelected && c.choraleWriteAccess) || c.choraleRecorderBusy
-                      }
+                      className="connect-toggle chorale-record"
+                      onClick={() => openChoraleRecorder(idx)}
+                      disabled={!(c.choraleFolderSelected && c.choraleWriteAccess)}
                       title={
                         c.choraleFolderSelected && c.choraleWriteAccess
-                          ? c.choraleRecorderArmed
-                            ? 'Chorale is watching your Meet Recordings folder. Click to turn off.'
-                            : 'Turn on ingest of Meet recordings from your Drive folder.'
+                          ? 'Open the recorder to capture system/tab audio and save it to your Drive folder.'
                           : 'Configure a Google Drive folder with write access first'
                       }
                     >
-                      {c.choraleRecorderBusy
-                        ? 'Working…'
-                        : c.choraleRecorderArmed
-                        ? 'Recorder On — Turn Off'
-                        : 'Turn-on Recorder'}
+                      Turn-on Recorder
                     </button>
                   </div>
                   {c.choraleFolderSelected && c.choraleWriteAccess && (
                     <div className="chorale-recorder-note" role="note">
-                      {c.choraleRecorderArmed ? (
-                        <>
-                          Watching <strong>{c.choraleFolderName ?? 'your folder'}</strong> for Google
-                          Meet recordings. When a host turns on recording in a call, Meet saves it here
-                          and Chorale sends it to Babelscribe to transcribe. Chorale can&apos;t start a
-                          Meet recording itself — a host must turn it on in the call.
-                        </>
-                      ) : (
-                        <>Recorder is off. Turn it on to auto-transcribe Meet recordings saved to your folder.</>
-                      )}
+                      Records your computer/tab audio and saves it to{' '}
+                      <strong>{c.choraleFolderName ?? 'your folder'}</strong>. When you click record,
+                      your browser asks which screen or tab to capture — pick the meeting tab and
+                      enable “share audio” to record all participants.
                     </div>
                   )}
                 </div>
@@ -1879,6 +2119,13 @@ function ConnectorsView({
         currentFolderName={connectors[choraleDriveUrlIdx].choraleFolderName ?? null}
         onSaved={(folder) => onChoraleFolderSavedFromUrl(choraleDriveUrlIdx, folder)}
         onClose={() => setChoraleDriveUrlIdx(null)}
+      />
+    )}
+    {choraleRecorderIdx !== null && connectors[choraleRecorderIdx] && (
+      <ChoraleRecorderModal
+        card={connectors[choraleRecorderIdx].key}
+        folderName={connectors[choraleRecorderIdx].choraleFolderName ?? 'your Drive folder'}
+        onClose={() => setChoraleRecorderIdx(null)}
       />
     )}
     {settingsIdx !== null && connectors[settingsIdx] && (

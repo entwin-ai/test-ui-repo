@@ -395,6 +395,12 @@
     border-top: 1px dashed var(--border); padding-top: 6px;
   }
   .chorale-recorder-note strong { color: var(--text-primary); font-weight: 600; }
+  .chorale-mic-opt {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12.5px; color: var(--text-secondary, #444);
+    margin: 4px 0 2px;
+  }
+  .chorale-mic-opt input { width: 15px; height: 15px; }
   .connect-toggle.chorale-record.connected,
   .connect-toggle.chorale-record {
     background: linear-gradient(135deg, #3a8dff 0%, #a24bff 55%, #e055c8 100%);
