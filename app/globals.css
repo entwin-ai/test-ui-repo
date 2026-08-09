@@ -2039,3 +2039,87 @@
   word-break: break-word;
 }
 .drive-selected-hint strong { color: var(--text-primary); }
+
+/* ---------------- All chats view ---------------- */
+.allchats-wrap {
+  padding: 24px 28px;
+  max-width: 1100px;
+}
+.allchats-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.allchats-search {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  height: 44px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text-muted);
+}
+.allchats-search:focus-within { border-color: var(--blue); }
+.allchats-search svg { flex-shrink: 0; }
+.allchats-search input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+.allchats-search input::placeholder { color: var(--text-muted); }
+.allchats-range {
+  height: 44px;
+  padding: 0 34px 0 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 14px;
+  color: var(--text-primary);
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+}
+.allchats-range:focus { outline: none; border-color: var(--blue); }
+.allchats-custom-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.allchats-custom-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.allchats-custom-field input {
+  height: 38px;
+  padding: 0 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.allchats-custom-field input:focus { outline: none; border-color: var(--blue); }
+.allchats-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+.allchats-empty {
+  padding: 32px 0;
+  font-size: 14px;
+  color: var(--text-muted);
+}

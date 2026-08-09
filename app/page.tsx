@@ -12,7 +12,7 @@ import { useSession, signIn, signOut } from 'next-auth/react'
 import { LOGO_DATA_URI } from './logo'
 import AnimaticsFlow from './animatics-flow'
 
-type ViewKey = 'chat' | 'connectors' | 'dashboard' | 'memory' | 'settings'
+type ViewKey = 'chat' | 'allchats' | 'connectors' | 'dashboard' | 'memory' | 'settings'
 type DashTab = 'overview' | 'kanban' | 'wa-kanban' | 'entities'
 type ListKey = 'marketing' | 'updates' | 'people'
 type ProviderKey = 'claude' | 'gemini' | 'openai' | 'neocloud' | 'onprem'
@@ -4000,10 +4000,75 @@ function SettingsView({ entwinName, setEntwinName, onLlmConfigChange }: { entwin
   )
 }
 
+/* ---------------- All chats view ---------------- */
+
+type ChatDateRange = 'all' | 'today' | '7d' | '30d' | 'custom'
+
+function AllChatsView() {
+  const [query, setQuery] = useState('')
+  const [range, setRange] = useState<ChatDateRange>('all')
+  const [customStart, setCustomStart] = useState('')
+  const [customEnd, setCustomEnd] = useState('')
+
+  return (
+    <div className="allchats-wrap">
+      <div className="allchats-controls">
+        <div className="allchats-search">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input
+            type="text"
+            placeholder="Search all chats…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            aria-label="Search all chats"
+          />
+        </div>
+
+        <select
+          className="allchats-range"
+          value={range}
+          onChange={(e) => setRange(e.target.value as ChatDateRange)}
+          aria-label="Filter by date"
+        >
+          <option value="all">All time</option>
+          <option value="today">Today</option>
+          <option value="7d">Last 7 days</option>
+          <option value="30d">Last 30 days</option>
+          <option value="custom">Custom range…</option>
+        </select>
+      </div>
+
+      {range === 'custom' && (
+        <div className="allchats-custom-row">
+          <label className="allchats-custom-field">
+            <span>From</span>
+            <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} />
+          </label>
+          <label className="allchats-custom-field">
+            <span>To</span>
+            <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} />
+          </label>
+        </div>
+      )}
+
+      <div className="allchats-section-label">TODAY</div>
+      <div className="allchats-empty">
+        {query.trim()
+          ? `No chats match “${query.trim()}”.`
+          : 'Your past conversations will appear here.'}
+      </div>
+    </div>
+  )
+}
+
 /* ---------------- App shell ---------------- */
 
 const NAV: { key: ViewKey; label: string; icon: JSX.Element }[] = [
   { key: 'chat', label: 'Chat', icon: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg> },
+  { key: 'allchats', label: 'All chats', icon: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg> },
   { key: 'connectors', label: 'Connectors', icon: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 2v6M15 2v6M6 8h12l-1 5a5 5 0 0 1-10 0z" /><path d="M12 17v5" /></svg> },
   { key: 'dashboard', label: 'Dashboard', icon: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="9" rx="1" /><rect x="14" y="3" width="7" height="5" rx="1" /><rect x="14" y="12" width="7" height="9" rx="1" /><rect x="3" y="16" width="7" height="5" rx="1" /></svg> },
   { key: 'memory', label: 'Memory', icon: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="6" cy="6" r="2.3" /><circle cx="18" cy="7" r="2.3" /><circle cx="10.5" cy="18" r="2.3" /><line x1="8.1" y1="6.6" x2="15.9" y2="6.9" /><line x1="7.4" y1="7.9" x2="9.6" y2="16" /><line x1="16.6" y1="8.9" x2="12.4" y2="16.4" /></svg> },
@@ -4621,6 +4686,12 @@ function AppShell() {
             }</div></div>
           </div>
           {view === 'chat' && <ChatView currentModel={currentModel} resetKey={chatResetKey} />}
+        </div>
+
+        {/* ALL CHATS */}
+        <div className={`view${view === 'allchats' ? ' active' : ''}`} id="view-allchats">
+          <div className="view-header">All chats<div className="sub">Every past Entwin conversation, searchable by text or date</div></div>
+          {view === 'allchats' && <AllChatsView />}
         </div>
 
         {/* CONNECTORS */}
