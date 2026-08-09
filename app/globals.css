@@ -2123,3 +2123,60 @@
   font-size: 14px;
   color: var(--text-muted);
 }
+
+/* ---------------- All chats: conversation cards ---------------- */
+.allchats-group { margin-bottom: 8px; }
+.allchats-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.allchats-card-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+}
+.allchats-card-head:hover { background: var(--bg-hover); }
+.allchats-card-main { min-width: 0; }
+.allchats-card-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.allchats-card-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+.allchats-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+.allchats-card.open .allchats-chevron { transform: rotate(180deg); }
+.allchats-thread {
+  padding: 8px 16px 16px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.allchats-thread .msg { max-width: 100%; }
+.allchats-msg-time {
+  margin-left: 8px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  font-weight: 400;
+}

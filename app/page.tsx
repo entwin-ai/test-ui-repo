@@ -326,31 +326,81 @@ function LoginScreen() {
 interface AskSource { n: number; url: string | null; date: string | null; urgency: string | null }
 interface ChatMsg { role: 'user' | 'assistant'; text: string; sources?: AskSource[]; error?: boolean }
 
-function ChatView({ currentModel, resetKey }: { currentModel: string; resetKey: number }) {
-  const [messages, setMessages] = useState<ChatMsg[]>([
-    { role: 'assistant', text: 'Hi, I\u2019m Entwin. Ask me anything about your email \u2014 what\u2019s outstanding, who\u2019s waiting on you, upcoming payments or deadlines \u2014 and I\u2019ll answer from your vault.' },
-  ])
+/** Mint a conversation id (crypto.randomUUID with a safe fallback). */
+function newClientId(): string {
+  try {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
+  } catch {
+    /* fall through */
+  }
+  return 'chat-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10)
+}
+
+function ChatView({
+  currentModel,
+  resetKey,
+  onPersisted,
+}: {
+  currentModel: string
+  resetKey: number
+  onPersisted?: () => void
+}) {
+  const GREETING =
+    'Hi, I\u2019m Entwin. Ask me anything about your email \u2014 what\u2019s outstanding, who\u2019s waiting on you, upcoming payments or deadlines \u2014 and I\u2019ll answer from your vault.'
+  const [messages, setMessages] = useState<ChatMsg[]>([{ role: 'assistant', text: GREETING }])
   const [value, setValue] = useState('')
   const [pending, setPending] = useState(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
+  // One conversation id per chat session. Regenerated on "New chat" (resetKey).
+  const clientIdRef = useRef<string>(newClientId())
+
   useEffect(() => {
-    if (resetKey > 0) setMessages([{ role: 'assistant', text: 'New chat started. What would you like to know?' }])
+    if (resetKey > 0) {
+      clientIdRef.current = newClientId()
+      setMessages([{ role: 'assistant', text: 'New chat started. What would you like to know?' }])
+    }
   }, [resetKey])
 
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight
   }, [messages, pending])
 
+  /**
+   * Persist the given turns for the current conversation, exactly as rendered.
+   * Fire-and-forget: a storage hiccup must never block the chat UX.
+   */
+  const persistTurns = async (turns: ChatMsg[]) => {
+    try {
+      const payload = turns.map((t) => ({
+        role: t.role,
+        text: t.text,
+        sources: t.sources ?? [],
+        isError: !!t.error,
+        model: currentModel || null,
+      }))
+      await fetch('/api/chats', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId: clientIdRef.current, turns: payload }),
+      })
+      onPersisted?.()
+    } catch {
+      /* best-effort persistence */
+    }
+  }
+
   const send = async () => {
     const text = value.trim()
     if (!text || pending) return
-    setMessages((m) => [...m, { role: 'user', text }])
+    const userTurn: ChatMsg = { role: 'user', text }
+    setMessages((m) => [...m, userTurn])
     setValue('')
     if (taRef.current) taRef.current.style.height = 'auto'
     setPending(true)
 
+    let assistantTurn: ChatMsg
     try {
       const res = await fetch('/api/ask', {
         method: 'POST',
@@ -364,21 +414,22 @@ function ChatView({ currentModel, resetKey }: { currentModel: string; resetKey: 
         const msg = data.needsKey
           ? 'I don\u2019t have an LLM key configured yet. Add your provider and API key in Settings, then ask again.'
           : `Sorry \u2014 I couldn\u2019t answer that. ${data.error || `(error ${res.status})`}`
-        setMessages((m) => [...m, { role: 'assistant', text: msg, error: true }])
+        assistantTurn = { role: 'assistant', text: msg, error: true }
       } else {
-        setMessages((m) => [
-          ...m,
-          { role: 'assistant', text: data.answer || 'No answer returned.', sources: data.sources || [] },
-        ])
+        assistantTurn = {
+          role: 'assistant',
+          text: data.answer || 'No answer returned.',
+          sources: data.sources || [],
+        }
       }
     } catch (e) {
-      setMessages((m) => [
-        ...m,
-        { role: 'assistant', text: `Network error: ${(e as Error).message}`, error: true },
-      ])
-    } finally {
-      setPending(false)
+      assistantTurn = { role: 'assistant', text: `Network error: ${(e as Error).message}`, error: true }
     }
+
+    setMessages((m) => [...m, assistantTurn])
+    setPending(false)
+    // Persist the user question and Entwin's reply as one ordered pair.
+    void persistTurns([userTurn, assistantTurn])
   }
 
   return (
@@ -4004,11 +4055,138 @@ function SettingsView({ entwinName, setEntwinName, onLlmConfigChange }: { entwin
 
 type ChatDateRange = 'all' | 'today' | '7d' | '30d' | 'custom'
 
-function AllChatsView() {
+interface StoredChatSource {
+  n: number
+  url: string | null
+  date: string | null
+  urgency: string | null
+  channel?: string | null
+  similarity?: number
+}
+interface StoredChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  sources: StoredChatSource[]
+  isError: boolean
+  model: string | null
+  seq: number
+  createdAt: string
+}
+interface StoredChatSession {
+  clientId: string
+  title: string
+  createdAt: string
+  updatedAt: string
+  messages: StoredChatMessage[]
+}
+
+/** Format an ISO instant as e.g. "Aug 9, 2026 · 3:04 PM". */
+function formatStamp(iso: string): string {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  const date = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+  const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  return `${date} \u00b7 ${time}`
+}
+
+/** Human day bucket label for a conversation's last-active date. */
+function dayBucket(iso: string): string {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return 'EARLIER'
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const t = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const dayMs = 86400000
+  if (t === startOfToday) return 'TODAY'
+  if (t === startOfToday - dayMs) return 'YESTERDAY'
+  if (t > startOfToday - 7 * dayMs) return 'EARLIER THIS WEEK'
+  if (t > startOfToday - 30 * dayMs) return 'EARLIER THIS MONTH'
+  return 'OLDER'
+}
+
+/** Convert a UI date range to an ISO "since" filter (or null for all-time). */
+function rangeSince(range: ChatDateRange, customStart: string): string | null {
+  const now = new Date()
+  if (range === 'today') {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    return d.toISOString()
+  }
+  if (range === '7d') return new Date(now.getTime() - 7 * 86400000).toISOString()
+  if (range === '30d') return new Date(now.getTime() - 30 * 86400000).toISOString()
+  if (range === 'custom' && customStart) {
+    const d = new Date(customStart)
+    if (!isNaN(d.getTime())) return d.toISOString()
+  }
+  return null
+}
+
+function AllChatsView({ refreshKey }: { refreshKey: number }) {
   const [query, setQuery] = useState('')
   const [range, setRange] = useState<ChatDateRange>('all')
   const [customStart, setCustomStart] = useState('')
   const [customEnd, setCustomEnd] = useState('')
+  const [sessions, setSessions] = useState<StoredChatSession[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+
+  // Debounce the free-text search so we don't fetch on every keystroke.
+  const [debouncedQuery, setDebouncedQuery] = useState('')
+  useEffect(() => {
+    const h = setTimeout(() => setDebouncedQuery(query), 250)
+    return () => clearTimeout(h)
+  }, [query])
+
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      setLoading(true)
+      setError(null)
+      try {
+        const params = new URLSearchParams()
+        if (debouncedQuery.trim()) params.set('search', debouncedQuery.trim())
+        const since = rangeSince(range, customStart)
+        if (since) params.set('since', since)
+        const res = await fetch(`/api/chats?${params.toString()}`)
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(data.error || `Failed (${res.status})`)
+        if (!cancelled) setSessions((data.sessions as StoredChatSession[]) || [])
+      } catch (e) {
+        if (!cancelled) setError((e as Error).message)
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    void load()
+    return () => {
+      cancelled = true
+    }
+  }, [debouncedQuery, range, customStart, refreshKey])
+
+  // Apply the custom "To" bound client-side (the API filters only on "since").
+  const visible = useMemo(() => {
+    if (range !== 'custom' || !customEnd) return sessions
+    const endD = new Date(customEnd)
+    if (isNaN(endD.getTime())) return sessions
+    const endMs = endD.getTime() + 86400000 // inclusive of the end day
+    return sessions.filter((s) => new Date(s.updatedAt).getTime() < endMs)
+  }, [sessions, range, customEnd])
+
+  // Group conversations (already newest-first from the API) into day buckets,
+  // preserving order.
+  const groups = useMemo(() => {
+    const out: { label: string; items: StoredChatSession[] }[] = []
+    for (const s of visible) {
+      const label = dayBucket(s.updatedAt)
+      const last = out[out.length - 1]
+      if (last && last.label === label) last.items.push(s)
+      else out.push({ label, items: [s] })
+    }
+    return out
+  }, [visible])
+
+  const toggle = (id: string) => setExpanded((e) => ({ ...e, [id]: !e[id] }))
 
   return (
     <div className="allchats-wrap">
@@ -4020,7 +4198,7 @@ function AllChatsView() {
           </svg>
           <input
             type="text"
-            placeholder="Search all chats…"
+            placeholder="Search all chats\u2026"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             aria-label="Search all chats"
@@ -4037,7 +4215,7 @@ function AllChatsView() {
           <option value="today">Today</option>
           <option value="7d">Last 7 days</option>
           <option value="30d">Last 30 days</option>
-          <option value="custom">Custom range…</option>
+          <option value="custom">Custom range\u2026</option>
         </select>
       </div>
 
@@ -4054,12 +4232,91 @@ function AllChatsView() {
         </div>
       )}
 
-      <div className="allchats-section-label">TODAY</div>
-      <div className="allchats-empty">
-        {query.trim()
-          ? `No chats match “${query.trim()}”.`
-          : 'Your past conversations will appear here.'}
-      </div>
+      {loading ? (
+        <div className="allchats-empty">Loading your chats\u2026</div>
+      ) : error ? (
+        <div className="allchats-empty" style={{ color: '#e53935' }}>{error}</div>
+      ) : visible.length === 0 ? (
+        <div className="allchats-empty">
+          {query.trim() || range !== 'all'
+            ? 'No chats match your filters.'
+            : 'No saved chats yet. Start a conversation and it will show up here.'}
+        </div>
+      ) : (
+        groups.map((g) => (
+          <div className="allchats-group" key={g.label}>
+            <div className="allchats-section-label">{g.label}</div>
+            {g.items.map((s) => {
+              const open = !!expanded[s.clientId]
+              const turnCount = s.messages.length
+              return (
+                <div className={`allchats-card${open ? ' open' : ''}`} key={s.clientId}>
+                  <button className="allchats-card-head" onClick={() => toggle(s.clientId)}>
+                    <div className="allchats-card-main">
+                      <div className="allchats-card-title">{s.title}</div>
+                      <div className="allchats-card-meta">
+                        {formatStamp(s.updatedAt)} \u00b7 {turnCount} message{turnCount === 1 ? '' : 's'}
+                      </div>
+                    </div>
+                    <svg
+                      className="allchats-chevron"
+                      width="16"
+                      height="16"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                  </button>
+
+                  {open && (
+                    <div className="allchats-thread">
+                      {s.messages.map((m) => (
+                        <div className={`msg ${m.role}`} key={m.id}>
+                          <div className="role-label">
+                            {m.role === 'user' ? 'You' : 'Entwin'}
+                            <span className="allchats-msg-time">{formatStamp(m.createdAt)}</span>
+                          </div>
+                          <div className="bubble" style={m.isError ? { color: '#e53935' } : undefined}>
+                            {m.text}
+                          </div>
+                          {m.sources && m.sources.length > 0 && (
+                            <div
+                              className="msg-sources"
+                              style={{ marginTop: 6, fontSize: 12, opacity: 0.8, display: 'flex', flexWrap: 'wrap', gap: 8 }}
+                            >
+                              {m.sources.map((src) =>
+                                src.url ? (
+                                  <a
+                                    key={src.n}
+                                    href={src.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    style={{ textDecoration: 'none' }}
+                                  >
+                                    [{src.n}] {src.date || 'email'}
+                                    {src.urgency ? ` \u00b7 ${src.urgency}` : ''}
+                                  </a>
+                                ) : (
+                                  <span key={src.n}>
+                                    [{src.n}] {src.date || 'email'}
+                                  </span>
+                                ),
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        ))
+      )}
     </div>
   )
 }
@@ -4088,6 +4345,7 @@ function AppShell() {
   const [collapsed, setCollapsed] = useState(false)
   const [view, setView] = useState<ViewKey>('chat')
   const [chatResetKey, setChatResetKey] = useState(0)
+  const [allChatsRefresh, setAllChatsRefresh] = useState(0)
 
   // LLM label shown top-right on every tab. Reflects the user's configured
   // model, or prompts to set an API key when none is stored. Loaded on mount and
@@ -4685,13 +4943,13 @@ function AppShell() {
                 : 'No model connected — set an API key in Settings'
             }</div></div>
           </div>
-          {view === 'chat' && <ChatView currentModel={currentModel} resetKey={chatResetKey} />}
+          {view === 'chat' && <ChatView currentModel={currentModel} resetKey={chatResetKey} onPersisted={() => setAllChatsRefresh((k) => k + 1)} />}
         </div>
 
         {/* ALL CHATS */}
         <div className={`view${view === 'allchats' ? ' active' : ''}`} id="view-allchats">
           <div className="view-header">All chats<div className="sub">Every past Entwin conversation, searchable by text or date</div></div>
-          {view === 'allchats' && <AllChatsView />}
+          {view === 'allchats' && <AllChatsView refreshKey={allChatsRefresh} />}
         </div>
 
         {/* CONNECTORS */}
