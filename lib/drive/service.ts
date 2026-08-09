@@ -10,14 +10,22 @@
  * incremental consent for the Drive write scope, then let them browse their
  * Drive and choose a destination folder.
  *
- * Scope choice: `drive.file`.
- *   - `drive.file` grants per-file access to files the app creates or that the
- *     user explicitly opens with the app. It is the least-privilege scope that
- *     still lets Chorale create recording files in the chosen folder, and it is
- *     NOT a Google "restricted"/"sensitive" scope, so it doesn't require the
- *     heavier OAuth verification that full `drive` does. We can enumerate the
- *     folder tree the user navigates (folders are listable) and then write new
- *     recording files into the selected folder.
+ * Scope choice: full `drive`.
+ *   - Chorale's "Configure GDrive" lets the user PASTE a link to an existing
+ *     Drive folder (typically a shared-drive folder) that Entwin should write
+ *     recordings into. Resolving that folder by id (GET /files/{id}) and
+ *     confirming write access requires the app to SEE a folder it did not
+ *     create. The narrower `drive.file` scope cannot do this — it only sees
+ *     files the app created or that the user opens via Google's native picker,
+ *     so a pasted folder returns 404. Full `drive` is therefore required to
+ *     both resolve the pasted folder and create recording files inside it.
+ *   - Note: full `drive` is a Google "restricted" scope. For production use
+ *     with external users the OAuth consent screen must pass Google's
+ *     restricted-scope verification (or the user must be a listed test user /
+ *     internal Workspace user). This is the trade-off for URL-based folder
+ *     selection; if you prefer to avoid restricted-scope verification, switch
+ *     back to `drive.file` and select folders through the Drive Explorer picker
+ *     instead of a pasted URL.
  *
  * The consent flow (per Chorale card):
  *   1. UI hits /api/drive/authorize?card=chorale-recorder -> we build a Google
@@ -39,7 +47,14 @@
 
 import crypto from 'crypto'
 
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file'
+// Full Drive scope. `drive.file` is narrower and preferable, BUT it can only
+// see files/folders the app itself created or that the user hands over through
+// Google's native file-picker. Chorale's "Configure GDrive" flow instead lets
+// the user PASTE a link to an existing (often shared-drive) folder, and
+// resolving that folder by id — GET /files/{id} — returns 404 under drive.file
+// no matter how the folder is shared. To both resolve a pasted folder by id and
+// write recordings into it, we need full `drive`.
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive'
 const OAUTH_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
 const OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const DRIVE_API = 'https://www.googleapis.com/drive/v3'
@@ -66,6 +81,13 @@ interface DriveSession {
   refreshToken?: string
   expiresAt?: number // unix ms
   writeAccess?: boolean
+  /**
+   * The raw OAuth `scope` string Google granted for this token. Used to detect
+   * a stale token minted under an older, narrower scope (e.g. drive.file) so we
+   * can force re-consent to pick up the current DRIVE_SCOPE instead of failing
+   * with a confusing 404 when resolving a pasted folder.
+   */
+  grantedScope?: string
   selectedFolder?: SelectedFolder
 }
 
@@ -261,7 +283,13 @@ export async function buildAuthUrl(
 export async function handleCallback(
   code: string,
   state: string,
-): Promise<{ userEmail: string; cardId: string; pendingFolderUrl?: string }> {
+): Promise<{
+  userEmail: string
+  cardId: string
+  pendingFolderUrl?: string
+  pendingFolderSaved?: boolean
+  pendingFolderError?: string
+}> {
   const flow = decodeState(state)
 
   const clientId = process.env.GOOGLE_CLIENT_ID
@@ -314,21 +342,38 @@ export async function handleCallback(
   sess.expiresAt = Date.now() + tok.expires_in * 1000
   sess.connectedEmail = connectedEmail
   sess.writeAccess = grantedWrite
+  sess.grantedScope = tok.scope || ''
   await saveSession(flow.userEmail, flow.cardId, sess)
 
   // If the user kicked off this consent from the "Configure GDrive" URL modal,
   // a folder URL rode along in the signed state. Now that we hold a write token,
   // resolve + verify it and persist it as the Chorale destination so the user
   // doesn't have to re-enter it after returning from Google.
-  if (flow.pendingFolderUrl && grantedWrite) {
-    try {
-      await selectFolderByUrl(flow.userEmail, flow.cardId, flow.pendingFolderUrl)
-    } catch {
-      /* Non-fatal: the UI will surface the error and let them retry the URL. */
+  let pendingFolderSaved: boolean | undefined
+  let pendingFolderError: string | undefined
+  if (flow.pendingFolderUrl) {
+    if (!grantedWrite) {
+      pendingFolderError = 'Drive write access was not granted on the consent screen.'
+    } else {
+      try {
+        const r = await selectFolderByUrl(flow.userEmail, flow.cardId, flow.pendingFolderUrl)
+        pendingFolderSaved = !r.needsAuth && !!r.selectedFolder
+        if (!pendingFolderSaved) pendingFolderError = 'Folder could not be saved.'
+      } catch (e) {
+        // Surface the real reason (bad link, 404/not visible, no write access)
+        // back to the UI instead of a generic message.
+        pendingFolderError = (e as Error).message
+      }
     }
   }
 
-  return { userEmail: flow.userEmail, cardId: flow.cardId, pendingFolderUrl: flow.pendingFolderUrl }
+  return {
+    userEmail: flow.userEmail,
+    cardId: flow.cardId,
+    pendingFolderUrl: flow.pendingFolderUrl,
+    pendingFolderSaved,
+    pendingFolderError,
+  }
 }
 
 async function ensureAccessToken(
@@ -544,6 +589,14 @@ export async function selectFolderByUrl(
   const sess = await getSession(userEmail, cardId)
   if (sess.state !== 'connected' || !sess.writeAccess) {
     // No usable write token yet — tell the caller to authorize first.
+    return { needsAuth: true }
+  }
+  // A token minted under an older, narrower scope (e.g. drive.file from a
+  // previous connect) cannot resolve a pasted folder by id and would 404. If the
+  // stored scope doesn't include the scope we now require, force re-consent so
+  // the flow re-runs OAuth (which requests the current DRIVE_SCOPE) and then
+  // auto-saves the folder on return.
+  if (!sess.grantedScope || !sess.grantedScope.includes(DRIVE_SCOPE)) {
     return { needsAuth: true }
   }
 

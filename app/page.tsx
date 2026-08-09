@@ -1468,6 +1468,21 @@ function ConnectorsView({
           }
         })()
       }
+    } else if (drive === 'savefailed') {
+      // Consent succeeded but resolving/saving the pasted folder failed. Mark
+      // write access granted (it was) and show the real reason so the user can
+      // fix it and re-paste via "Configure GDrive".
+      setConnectors((prev) =>
+        prev.map((x) =>
+          x.key === 'chorale-recorder' ? { ...x, choraleWriteAccess: true } : x,
+        ),
+      )
+      const reason = params.get('reason')
+      setDriveNotice(
+        `Google access was granted, but the folder could not be saved${
+          reason ? `: ${decodeURIComponent(reason)}` : '.'
+        } Open “Configure GDrive” and re-paste the folder link.`,
+      )
     } else if (drive === 'connected') {
       const idx = connectors.findIndex((c) => c.key === 'chorale-recorder')
       if (idx >= 0) {

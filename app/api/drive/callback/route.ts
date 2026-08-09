@@ -24,12 +24,21 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const { cardId, pendingFolderUrl } = await handleCallback(code, state)
+    const { cardId, pendingFolderUrl, pendingFolderSaved, pendingFolderError } =
+      await handleCallback(code, state)
     // If the user came from the "Configure GDrive" URL modal, the folder was
     // already resolved + saved during the token exchange — tell the UI to just
     // hydrate the card (drive=saved) instead of opening the folder explorer.
-    const outcome = pendingFolderUrl ? 'saved' : 'connected'
-    return NextResponse.redirect(`${base}/?drive=${outcome}&card=${cardId}`)
+    if (pendingFolderUrl) {
+      if (pendingFolderSaved) {
+        return NextResponse.redirect(`${base}/?drive=saved&card=${cardId}`)
+      }
+      // Consent succeeded but the folder didn't save — carry the real reason so
+      // the card can show something actionable instead of a generic message.
+      const reason = encodeURIComponent(pendingFolderError || 'Folder could not be saved.')
+      return NextResponse.redirect(`${base}/?drive=savefailed&card=${cardId}&reason=${reason}`)
+    }
+    return NextResponse.redirect(`${base}/?drive=connected&card=${cardId}`)
   } catch (e) {
     const reason = encodeURIComponent((e as Error).message || 'callback failed')
     return NextResponse.redirect(`${base}/?drive=error&reason=${reason}`)
