@@ -699,14 +699,18 @@ function WhatsAppModal({
 
 /* ---------------- Babelscribe modal ---------------- */
 
-type BabelPhase = 'input' | 'submitting' | 'started' | 'error'
+type BabelPhase = 'input' | 'submitting' | 'running' | 'ready' | 'failed' | 'error'
 
 function BabelscribeModal({ onClose }: { onClose: () => void }) {
   const [phase, setPhase] = useState<BabelPhase>('input')
   const [path, setPath] = useState('')
-  const [runsUrl, setRunsUrl] = useState<string | null>(null)
+  const [runId, setRunId] = useState<string | null>(null)
   const [message, setMessage] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
+  // Live current-activity label from the workflow (e.g. "Set up job",
+  // "Transcribe + translate"). Defaults to a neutral queued state.
+  const [phaseLabel, setPhaseLabel] = useState<string>('Queued')
+  const [downloading, setDownloading] = useState(false)
 
   // Light client-side check that the path contains something id-like, so we can
   // enable the button. The server does the authoritative extraction/validation.
@@ -736,12 +740,87 @@ function BabelscribeModal({ onClose }: { onClose: () => void }) {
         /* ignore */
       }
       if (!res.ok) throw new Error(payload.error || `Request failed (${res.status})`)
-      setRunsUrl(payload.runsUrl ?? null)
-      setMessage(payload.message ?? 'Transcription started.')
-      setPhase('started')
+      setRunId(payload.runId ?? null)
+      setMessage(payload.message ?? 'Transcription in-progress.')
+      setPhaseLabel('Queued')
+      setPhase('running')
     } catch (e) {
       setError((e as Error).message)
       setPhase('error')
+    }
+  }
+
+  // Poll the workflow run for its live step + completion while we're running.
+  useEffect(() => {
+    if (phase !== 'running' || !runId) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    const poll = async () => {
+      try {
+        const res = await fetch(
+          `/api/babelscribe/status?runId=${encodeURIComponent(runId)}`,
+          { cache: 'no-store' },
+        )
+        const data = await res.json().catch(() => ({}))
+        if (cancelled) return
+        if (res.ok && data?.ok) {
+          if (data.phaseLabel) setPhaseLabel(data.phaseLabel)
+          if (data.done) {
+            if (data.failed) {
+              setError('The transcription run did not complete successfully.')
+              setPhase('failed')
+              return
+            }
+            if (data.artifactReady) {
+              setPhase('ready')
+              return
+            }
+            // Completed successfully but artifact not yet listed — keep polling
+            // briefly for the upload to settle.
+            setPhaseLabel('Finalizing')
+          }
+        }
+      } catch {
+        /* transient — keep polling */
+      }
+      if (!cancelled) timer = setTimeout(poll, 4000)
+    }
+
+    poll()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [phase, runId])
+
+  // Fetch transcript.pdf and trigger a browser download.
+  const downloadTranscript = async () => {
+    if (!runId) return
+    setDownloading(true)
+    setError(null)
+    try {
+      const res = await fetch(
+        `/api/babelscribe/transcript?runId=${encodeURIComponent(runId)}`,
+        { cache: 'no-store' },
+      )
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data?.error || `Download failed (${res.status})`)
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'transcript.pdf'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setDownloading(false)
     }
   }
 
@@ -792,16 +871,59 @@ function BabelscribeModal({ onClose }: { onClose: () => void }) {
           </div>
         ) : null}
 
-        {phase === 'started' ? (
+        {phase === 'running' ? (
+          <div className="wa-body wa-success">
+            <div className="wa-check wa-check-spin" style={{ background: '#20325A' }}>
+              <span className="wa-spinner" aria-hidden="true" />
+            </div>
+            <div className="wa-success-title">Transcription in-progress</div>
+            <p className="wa-fineprint">{message}</p>
+            {/* Live current step of the GitHub Actions run, in place of the old
+                "Open the transcription job" link. */}
+            <div className="wa-link wa-phase" aria-live="polite">
+              <span className="wa-phase-dot" aria-hidden="true" />
+              {phaseLabel}
+            </div>
+            {error && <div className="wa-error">{error}</div>}
+            <div className="wa-actions" style={{ justifyContent: 'center', marginTop: 16 }}>
+              <button className="wa-btn ghost" onClick={onClose}>
+                Close
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {phase === 'ready' ? (
           <div className="wa-body wa-success">
             <div className="wa-check" style={{ background: '#20325A' }}>✓</div>
-            <div className="wa-success-title">Transcription started</div>
-            <p className="wa-fineprint">{message}</p>
-            {runsUrl && (
-              <a className="wa-link" href={runsUrl} target="_blank" rel="noreferrer">
-                Open the transcription job ↗
-              </a>
-            )}
+            <div className="wa-success-title">Transcript ready</div>
+            <p className="wa-fineprint">
+              Your English transcript is ready. It was also emailed to your login address.
+            </p>
+            {/* Same slot as the old job link — now a downloadable transcript. */}
+            <button
+              className="wa-link wa-link-btn"
+              onClick={downloadTranscript}
+              disabled={downloading}
+            >
+              {downloading ? 'Preparing…' : 'Transcript Link ⬇'}
+            </button>
+            {error && <div className="wa-error">{error}</div>}
+            <div className="wa-actions" style={{ justifyContent: 'center', marginTop: 16 }}>
+              <button className="wa-btn primary" onClick={onClose}>
+                Done
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {phase === 'failed' ? (
+          <div className="wa-body wa-success">
+            <div className="wa-check" style={{ background: '#8a2b2b' }}>×</div>
+            <div className="wa-success-title">Transcription failed</div>
+            <p className="wa-fineprint">
+              {error || 'The run did not complete successfully. Check your Drive link’s share access and try again.'}
+            </p>
             <div className="wa-actions" style={{ justifyContent: 'center', marginTop: 16 }}>
               <button className="wa-btn primary" onClick={onClose}>
                 Done

@@ -1753,6 +1753,43 @@
 }
 .wa-link:hover { text-decoration: underline; }
 
+/* Babelscribe — in-progress spinner + live phase + transcript link button */
+.wa-check-spin { background: transparent !important; }
+.wa-spinner {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 3px solid rgba(32, 50, 90, 0.2);
+  border-top-color: #20325A;
+  display: inline-block;
+  animation: wa-spin 0.8s linear infinite;
+}
+@keyframes wa-spin { to { transform: rotate(360deg); } }
+.wa-phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  cursor: default;
+}
+.wa-phase-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #20325A;
+  animation: wa-pulse 1.2s ease-in-out infinite;
+}
+@keyframes wa-pulse { 0%,100% { opacity: 0.35; } 50% { opacity: 1; } }
+.wa-link-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+}
+.wa-link-btn:disabled { opacity: 0.6; cursor: default; }
+
 /* ---------------- Animatics Phase 1 flow ---------------- */
 .animatics-overlay {
   position: fixed;
