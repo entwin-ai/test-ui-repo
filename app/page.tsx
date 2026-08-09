@@ -180,13 +180,14 @@ interface Connector {
   choraleFolderSelected?: boolean
   choraleWriteAccess?: boolean
   choraleFolderName?: string | null
+  choraleFolderId?: string | null
 }
 
 const INITIAL_CONNECTORS: Connector[] = [
   { name: 'Gmail — Personal', service: 'gmail', icon: 'gmail', cardId: 'gmail-personal', key: 'gmail-personal', desc: 'Email ingestion for the vault.', connected: false, connectedEmail: null, scan: null },
   { name: 'Gmail — Professional', service: 'gmail', icon: 'gmail', cardId: 'gmail-professional', key: 'gmail-professional', desc: 'Email ingestion for the vault.', connected: false, connectedEmail: null, scan: null },
   { name: 'Google Drive — Personal', service: 'drive', icon: 'drive', key: 'drive-personal', desc: 'Document ingestion for the vault.', connected: false, connectedEmail: null },
-  { name: 'Chorale: The Voice Recorder', service: 'drive', icon: 'chorale', key: 'chorale-recorder', desc: '', connected: false, connectedEmail: null, choraleFolderSelected: false, choraleWriteAccess: false, choraleFolderName: null },
+  { name: 'Chorale: The Voice Recorder', service: 'drive', icon: 'chorale', key: 'chorale-recorder', desc: '', connected: false, connectedEmail: null, choraleFolderSelected: false, choraleWriteAccess: false, choraleFolderName: null, choraleFolderId: null },
   { name: 'Google Calendar', service: null, icon: 'calendar', key: 'calendar', desc: 'Meeting and scheduling context.', connected: false, connectedEmail: null },
   { name: 'WhatsApp', service: 'whatsapp', code: 'WA', key: 'whatsapp', desc: 'Personal messages, vectorized into cross-channel memory.', connected: false, connectedEmail: null, wa: null },
   { name: 'Animatics', service: null, icon: 'animatics', key: 'animatics', desc: 'Create Anime from your Novel', connected: false, connectedEmail: null },
@@ -899,6 +900,227 @@ function ChoraleRecorderModal({
   )
 }
 
+/* ---------------- Google Drive folder explorer ---------------- */
+
+interface DriveExplorerFolder {
+  id: string
+  name: string
+}
+
+// One level in the breadcrumb trail as the user drills into Drive. `root` is
+// "My Drive"; each subsequent crumb is a folder the user opened.
+interface DriveCrumb {
+  id: string
+  name: string
+}
+
+// Modal that browses the user's Google Drive folder tree (via /api/drive/folders)
+// and lets them pick a destination folder for Chorale recordings. Opened right
+// after the Drive write-access consent returns. On "Use this folder" it persists
+// the choice (/api/drive/select) and hands the folder id/name/path back to the
+// card, then closes.
+function DriveExplorerModal({
+  card,
+  connectedEmail,
+  onSelect,
+  onClose,
+}: {
+  card: string
+  connectedEmail?: string | null
+  onSelect: (folder: { id: string; name: string; path: string }) => void
+  onClose: () => void
+}) {
+  // Breadcrumb trail; always starts at My Drive (root).
+  const [trail, setTrail] = useState<DriveCrumb[]>([{ id: 'root', name: 'My Drive' }])
+  const [folders, setFolders] = useState<DriveExplorerFolder[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  const current = trail[trail.length - 1]
+  const pathString = trail.map((c) => c.name).join(' / ')
+
+  // Load the folders under the current breadcrumb whenever it changes.
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    ;(async () => {
+      try {
+        const res = await fetch(
+          `/api/drive/folders?card=${encodeURIComponent(card)}&parent=${encodeURIComponent(current.id)}`,
+        )
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}))
+          throw new Error(body.error || `Failed to list folders (${res.status})`)
+        }
+        const data = (await res.json()) as { folders?: DriveExplorerFolder[] }
+        if (!cancelled) setFolders(data.folders ?? [])
+      } catch (e) {
+        if (!cancelled) setError((e as Error).message || 'Could not load Drive folders.')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [card, current.id])
+
+  // Drill into a subfolder — push it onto the trail.
+  const openFolder = (f: DriveExplorerFolder) => {
+    setTrail((t) => [...t, { id: f.id, name: f.name }])
+  }
+
+  // Jump back to an ancestor crumb.
+  const goToCrumb = (idx: number) => {
+    setTrail((t) => t.slice(0, idx + 1))
+  }
+
+  // Commit the current folder as the Chorale destination.
+  const useThisFolder = async () => {
+    setSaving(true)
+    setError(null)
+    const folder = { id: current.id, name: current.name, path: pathString }
+    try {
+      // Persist server-side. Best-effort: if it fails we still hand the folder
+      // to the card so the flow isn't blocked, and surface a soft error.
+      const res = await fetch('/api/drive/select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          card,
+          folderId: folder.id,
+          folderName: folder.name,
+          folderPath: folder.path,
+        }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.error || `Could not save selection (${res.status})`)
+      }
+      onSelect(folder)
+    } catch (e) {
+      // Non-fatal: still complete the selection locally so the user isn't stuck.
+      setError((e as Error).message || 'Selection could not be saved to the server.')
+      onSelect(folder)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="wa-overlay" role="dialog" aria-modal="true" aria-label="Choose a Google Drive folder">
+      <div className="wa-window drive-window">
+        <div className="wa-head">
+          <div className="wa-badge drive-badge" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            </svg>
+          </div>
+          <div className="wa-head-title">
+            Select a Google Drive folder
+            {connectedEmail ? <span className="drive-account"> · {connectedEmail}</span> : null}
+          </div>
+          <button className="wa-close" aria-label="Close" onClick={onClose}>
+            ×
+          </button>
+        </div>
+
+        <div className="wa-body">
+          <p className="wa-lead">
+            Choose the folder where Chorale should save your recordings. Open a folder to browse
+            inside it, then click <strong>Use this folder</strong>.
+          </p>
+
+          {/* Breadcrumb trail */}
+          <nav className="drive-breadcrumbs" aria-label="Folder path">
+            {trail.map((c, i) => (
+              <span key={`${c.id}-${i}`} className="drive-crumb-wrap">
+                <button
+                  type="button"
+                  className={`drive-crumb ${i === trail.length - 1 ? 'current' : ''}`}
+                  onClick={() => goToCrumb(i)}
+                  disabled={i === trail.length - 1}
+                >
+                  {c.name}
+                </button>
+                {i < trail.length - 1 && <span className="drive-crumb-sep">/</span>}
+              </span>
+            ))}
+          </nav>
+
+          {/* Folder list */}
+          <div className="drive-list" role="listbox" aria-label="Folders">
+            {loading ? (
+              <div className="drive-empty">Loading folders…</div>
+            ) : error ? (
+              <div className="wa-error">{error}</div>
+            ) : folders.length === 0 ? (
+              <div className="drive-empty">
+                No subfolders here. You can select this folder, or go back up.
+              </div>
+            ) : (
+              folders.map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  className="drive-item"
+                  onClick={() => openFolder(f)}
+                  title={`Open ${f.name}`}
+                >
+                  <svg
+                    className="drive-item-icon"
+                    width="18"
+                    height="18"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                  </svg>
+                  <span className="drive-item-name">{f.name}</span>
+                  <svg
+                    className="drive-item-chevron"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M9 18l6-6-6-6" />
+                  </svg>
+                </button>
+              ))
+            )}
+          </div>
+
+          <div className="drive-selected-hint">
+            Selected destination: <strong>{pathString}</strong>
+          </div>
+
+          <div className="wa-actions">
+            <button className="wa-btn ghost" onClick={onClose} disabled={saving}>
+              Cancel
+            </button>
+            <button className="wa-btn primary" onClick={useThisFolder} disabled={saving || loading}>
+              {saving ? 'Saving…' : 'Use this folder'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /* ---------------- Connectors view ---------------- */
 
 function ConnectorsView({
@@ -935,6 +1157,11 @@ function ConnectorsView({
   const [babelscribeOpen, setBabelscribeOpen] = useState(false)
   // Index of the connector whose Chorale recorder modal is open, or null.
   const [choraleRecordingIdx, setChoraleRecordingIdx] = useState<number | null>(null)
+  // Index of the connector whose Drive folder-explorer modal is open, or null.
+  // Opened after the Drive write-access consent returns (?drive=connected).
+  const [driveExplorerIdx, setDriveExplorerIdx] = useState<number | null>(null)
+  // Notice shown when the Drive consent is cancelled or errors out.
+  const [driveNotice, setDriveNotice] = useState<string | null>(null)
 
   // On mount, reflect any in-progress Animatics run so the button shows the
   // right label after a page reload.
@@ -954,53 +1181,23 @@ function ConnectorsView({
     }
   }, [])
 
-  // Chorale — "Configure GDrive": always enabled. Requests Google Drive write
-  // permission and lets the user pick a target folder. On success, the folder +
-  // write-access flags are set, which enables "Start Recording". Wired to the
-  // real Drive OAuth/picker flow via /api/drive/authorize (drive.file scope);
-  // it returns the chosen folder id/name, which the app persists.
+  // Chorale — "Configure GDrive": always enabled. This kicks off the real
+  // Google flow to (re)validate the user's Google account and grant Drive WRITE
+  // (drive.file) access, then — on return — opens the Drive Explorer so the user
+  // can pick a destination folder.
+  //
+  // Step 1 (here): navigate the browser to /api/drive/authorize, which redirects
+  //   to Google's account chooser + consent screen (prompt=select_account
+  //   consent, so authentication is always re-validated for write access).
+  // Step 2 (on return, ?drive=connected): the effect below opens the Drive
+  //   Explorer modal (DriveExplorerModal) for folder selection.
+  // Step 3 (in the modal): selecting a folder persists it and closes the popup.
   const configureChoraleDrive = (idx: number) => {
     const c = connectors[idx]
-    // Hand off to Google for write consent + folder selection. On return the
-    // callback marks the card as folder-selected with write access. If the
-    // Drive picker/authorize endpoint isn't wired in this environment, fall
-    // back to marking access locally so the recorder can be exercised.
-    fetch(`/api/drive/authorize?card=${encodeURIComponent(c.key)}&scope=write&picker=folder`, {
-      method: 'GET',
-    })
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`Drive authorize failed (${res.status})`)
-        // The endpoint may either redirect (handled by the browser) or return
-        // a JSON payload with the chosen folder + granted scope.
-        const ct = res.headers.get('content-type') || ''
-        if (ct.includes('application/json')) {
-          const payload = await res.json().catch(() => ({}))
-          return {
-            folderName: payload.folderName ?? payload.folder?.name ?? 'Selected folder',
-            writeAccess: payload.writeAccess ?? true,
-          }
-        }
-        return { folderName: 'Selected folder', writeAccess: true }
-      })
-      .then(({ folderName, writeAccess }) => {
-        setConnectors((prev) =>
-          prev.map((x, i) =>
-            i === idx
-              ? { ...x, choraleFolderSelected: true, choraleWriteAccess: !!writeAccess, choraleFolderName: folderName }
-              : x,
-          ),
-        )
-      })
-      .catch(() => {
-        // Graceful fallback so the flow is exercisable without the live backend.
-        setConnectors((prev) =>
-          prev.map((x, i) =>
-            i === idx
-              ? { ...x, choraleFolderSelected: true, choraleWriteAccess: true, choraleFolderName: 'Selected folder' }
-              : x,
-          ),
-        )
-      })
+    // Full-page handoff to Google (same pattern as Gmail/Slack connect). The
+    // browser follows the 302 to accounts.google.com; we come back to the app
+    // with ?drive=connected&card=... once consent is granted.
+    window.location.href = `/api/drive/authorize?card=${encodeURIComponent(c.key)}`
   }
 
   // Chorale — "Start Recording": only reachable when a Drive folder is selected
@@ -1009,6 +1206,104 @@ function ConnectorsView({
     const c = connectors[idx]
     if (!(c.choraleFolderSelected && c.choraleWriteAccess)) return
     setChoraleRecordingIdx(idx)
+  }
+
+  // On mount, hydrate the Chorale card from its server-side Drive session so a
+  // previously granted write scope and chosen folder survive a page refresh
+  // (mirrors the Gmail/Slack hydrators). If the token/selection is gone, the
+  // card falls back to needing Configure GDrive again.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const idx = connectors.findIndex((c) => c.key === 'chorale-recorder')
+      if (idx < 0) return
+      try {
+        const res = await fetch('/api/drive/status?card=chorale-recorder')
+        if (!res.ok) return
+        const d = (await res.json()) as {
+          state?: string
+          connectedEmail?: string | null
+          writeAccess?: boolean
+          selectedFolder?: { id: string; name: string; path: string } | null
+        }
+        if (cancelled) return
+        const connected = d.state === 'connected'
+        setConnectors((prev) =>
+          prev.map((x) =>
+            x.key === 'chorale-recorder'
+              ? {
+                  ...x,
+                  choraleWriteAccess: connected && !!d.writeAccess,
+                  choraleFolderSelected: connected && !!d.selectedFolder,
+                  choraleFolderId: d.selectedFolder?.id ?? null,
+                  choraleFolderName: d.selectedFolder?.path ?? d.selectedFolder?.name ?? x.choraleFolderName ?? null,
+                  connectedEmail: d.connectedEmail ?? x.connectedEmail ?? null,
+                }
+              : x,
+          ),
+        )
+      } catch {
+        /* best-effort hydration */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // On return from the Drive write-access consent (?drive=connected&card=...),
+  // record that write access is granted and open the Drive Explorer so the user
+  // can pick a folder. ?drive=denied / ?drive=error surface a notice instead.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const drive = params.get('drive')
+    if (!drive) return
+
+    if (drive === 'connected') {
+      const idx = connectors.findIndex((c) => c.key === 'chorale-recorder')
+      if (idx >= 0) {
+        // Mark write access granted; folder selection completes in the modal.
+        setConnectors((prev) =>
+          prev.map((x) =>
+            x.key === 'chorale-recorder' ? { ...x, choraleWriteAccess: true } : x,
+          ),
+        )
+        setDriveExplorerIdx(idx)
+      }
+    } else if (drive === 'denied') {
+      setDriveNotice('Google Drive access was cancelled — you did not grant write access.')
+    } else if (drive === 'error') {
+      const reason = params.get('reason')
+      setDriveNotice(
+        `Google Drive connection failed${reason ? `: ${decodeURIComponent(reason)}` : ''}. Please try again.`,
+      )
+    }
+    // Clean the URL so a refresh doesn't re-trigger the flow.
+    window.history.replaceState({}, '', window.location.pathname)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // When the user selects a folder in the Drive Explorer: stamp it onto the
+  // card (folder selected + write access), close the popup.
+  const onDriveFolderSelected = (
+    idx: number,
+    folder: { id: string; name: string; path: string },
+  ) => {
+    setConnectors((prev) =>
+      prev.map((x, i) =>
+        i === idx
+          ? {
+              ...x,
+              choraleFolderSelected: true,
+              choraleWriteAccess: true,
+              choraleFolderId: folder.id,
+              choraleFolderName: folder.path || folder.name,
+            }
+          : x,
+      ),
+    )
+    setDriveExplorerIdx(null)
   }
 
   const toggle = (idx: number) => {
@@ -1124,6 +1419,12 @@ function ConnectorsView({
       <div className="gmail-notice" role="alert">
         <span>{notice}</span>
         <button className="gmail-notice-close" aria-label="Dismiss" onClick={clearNotice}>×</button>
+      </div>
+    )}
+    {driveNotice && (
+      <div className="gmail-notice" role="alert">
+        <span>{driveNotice}</span>
+        <button className="gmail-notice-close" aria-label="Dismiss" onClick={() => setDriveNotice(null)}>×</button>
       </div>
     )}
     <div id="connectors-grid">
@@ -1371,6 +1672,14 @@ function ConnectorsView({
       <ChoraleRecorderModal
         folderName={connectors[choraleRecordingIdx].choraleFolderName ?? 'Selected folder'}
         onClose={() => setChoraleRecordingIdx(null)}
+      />
+    )}
+    {driveExplorerIdx !== null && connectors[driveExplorerIdx] && (
+      <DriveExplorerModal
+        card={connectors[driveExplorerIdx].key}
+        connectedEmail={connectors[driveExplorerIdx].connectedEmail}
+        onSelect={(folder) => onDriveFolderSelected(driveExplorerIdx, folder)}
+        onClose={() => setDriveExplorerIdx(null)}
       />
     )}
     {settingsIdx !== null && connectors[settingsIdx] && (

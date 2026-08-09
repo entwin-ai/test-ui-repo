@@ -1,0 +1,33 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { handleCallback } from '@/lib/drive/service'
+
+export const dynamic = 'force-dynamic'
+
+/**
+ * GET /api/drive/callback?code=...&state=...
+ * Google redirects here after the Drive write-access consent. We exchange the
+ * code for tokens, attach them to the Chorale card, then bounce the browser
+ * back to the app with ?drive=connected&card=... so the UI opens the Drive
+ * Explorer for folder selection.
+ */
+export async function GET(req: NextRequest) {
+  const base = process.env.NEXTAUTH_URL || req.nextUrl.origin
+  const code = req.nextUrl.searchParams.get('code')
+  const state = req.nextUrl.searchParams.get('state')
+  const error = req.nextUrl.searchParams.get('error')
+
+  if (error) {
+    return NextResponse.redirect(`${base}/?drive=denied`)
+  }
+  if (!code || !state) {
+    return NextResponse.redirect(`${base}/?drive=error`)
+  }
+
+  try {
+    const { cardId } = await handleCallback(code, state)
+    return NextResponse.redirect(`${base}/?drive=connected&card=${cardId}`)
+  } catch (e) {
+    const reason = encodeURIComponent((e as Error).message || 'callback failed')
+    return NextResponse.redirect(`${base}/?drive=error&reason=${reason}`)
+  }
+}
