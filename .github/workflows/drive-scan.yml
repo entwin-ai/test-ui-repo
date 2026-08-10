@@ -71,10 +71,18 @@ jobs:
                 + (if $f == "true" then {force: true} else {} end)')
 
           echo "POST $APP_URL/api/drive/scan-all  body=$BODY"
-          # --fail-with-body so a non-2xx makes the step fail AND prints why.
-          HTTP=$(curl -sS --fail-with-body \
+          # -L + --post30x follow redirects while preserving POST+body+auth
+          # header; -w surfaces the final status/URL so an auth-wall redirect is
+          # legible instead of a bare "Redirecting..." body.
+          RESP=$(curl -sS -L --post301 --post302 --post307 \
+            -w "\nHTTP_STATUS:%{http_code} FINAL_URL:%{url_effective}" \
             -X POST "$APP_URL/api/drive/scan-all" \
             -H "Authorization: Bearer $CRON_SECRET" \
             -H "Content-Type: application/json" \
-            -d "$BODY") || { echo "scan-all call failed: $HTTP" >&2; exit 1; }
-          echo "$HTTP"
+            -d "$BODY")
+          echo "$RESP"
+          STATUS=$(printf '%s' "$RESP" | sed -n 's/.*HTTP_STATUS:\([0-9]*\).*/\1/p')
+          if [ "$STATUS" != "200" ] && [ "$STATUS" != "202" ] && [ "$STATUS" != "207" ]; then
+            echo "scan-all did not return success (status=$STATUS). If FINAL_URL is a login/redirect, fix APP_BASE_URL to the canonical https host and ensure CRON_SECRET matches the server." >&2
+            exit 1
+          fi
