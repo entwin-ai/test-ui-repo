@@ -96,15 +96,14 @@ async function writeNoteForFacet(acct, provider, { anchorRow, chatName, noteDate
 
   const noteId = await nextNoteId(user_email, noteDate, 'whatsapp');
 
-  // Deep-link back into WhatsApp for the source chip. wa.me opens a 1:1 chat;
-  // groups/communities have no wa.me target.
-  const chatJid = anchorRow.chat_id || '';
-  const phoneOrGroup = String(chatJid).split('@')[0];
-  const sourceUrl = isGroupJid(chatJid)
-    ? null
-    : phoneOrGroup
-    ? `https://wa.me/${phoneOrGroup}`
-    : null;
+  // WhatsApp notes have NO addressable web permalink. A wa.me/<number> link is
+  // not a citation to a specific message — it just tries to open a 1:1 chat, and
+  // for an unsaved / group / non-WhatsApp number it dead-ends on a "this link is
+  // not valid" page. So we deliberately do NOT emit a source_url for WhatsApp:
+  // the reference chip renders as a non-clickable "date · WhatsApp" label
+  // instead of a broken link. (Provenance still lives on the row via
+  // wa_message_id / source_ref below.)
+  const sourceUrl = null;
 
   const related = Array.isArray(facet.related_entities) ? facet.related_entities : [];
 

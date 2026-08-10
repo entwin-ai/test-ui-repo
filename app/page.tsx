@@ -3585,8 +3585,33 @@ function DashboardView({ connectedCount, total, entities, setEntities }: { conne
 
 interface GraphNode { id: string; name: string; type: string; size: number; firstSeen?: string; lastSeen?: string }
 interface GraphEdge { source: string; target: string; weight: number }
-interface WikiSource { n: number; url: string | null; date: string | null; urgency: string | null; similarity: number }
+interface WikiSource { n: number; url: string | null; date: string | null; urgency: string | null; channel?: string | null; similarity: number }
 interface WikiState { answer: string; sources: WikiSource[]; loading: boolean }
+
+// A WhatsApp contact with no saved / push name falls back to its raw phone
+// number as the entity name (a bare digit string like "+59549805449252").
+// Rendered verbatim that reads as a malformed number. This groups the digits
+// into a clean, readable form (e.g. "+595 4980 5449 252") without asserting a
+// country code we don't actually know. Non-phone names pass through untouched.
+function displayEntityName(name: string): string {
+  const raw = (name || '').trim()
+  const m = raw.match(/^\+?(\d{7,15})$/)
+  if (!m) return raw
+  const digits = m[1]
+  // Group as: country hint (leading 1-3 digits) then 3-4 digit blocks.
+  const groups: string[] = []
+  let rest = digits
+  // First block: up to 3 digits as a loose country-code hint.
+  const head = rest.slice(0, rest.length > 10 ? 3 : rest.length > 7 ? 2 : 1)
+  groups.push(head)
+  rest = rest.slice(head.length)
+  while (rest.length > 0) {
+    const take = rest.length > 4 ? 4 : rest.length
+    groups.push(rest.slice(0, take))
+    rest = rest.slice(take)
+  }
+  return `+${groups.join(' ')}`
+}
 
 function RebuildGraphButton() {
   const [state, setState] = useState<'idle' | 'queuing' | 'queued' | 'error'>('idle')
@@ -3628,6 +3653,17 @@ function RebuildGraphButton() {
   )
 }
 
+// Human label for a source channel, used when the note has no web permalink
+// (WhatsApp notes never do — see the wiki RAG / worker notes).
+function channelLabel(channel?: string | null): string | null {
+  if (!channel) return null
+  const c = channel.toLowerCase()
+  if (c === 'whatsapp') return 'WhatsApp'
+  if (c === 'slack') return 'Slack'
+  if (c === 'email' || c === 'gmail') return 'Email'
+  return channel
+}
+
 function refLabel(s: WikiSource): string {
   const parts: string[] = []
   if (s.date) {
@@ -3635,7 +3671,13 @@ function refLabel(s: WikiSource): string {
     parts.push(isNaN(d.getTime()) ? String(s.date) : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }))
   }
   if (s.url) {
+    // Web-addressable source (e.g. Gmail permalink): show the hostname.
     try { parts.push(new URL(s.url).hostname.replace(/^www\./, '')) } catch { /* ignore */ }
+  } else {
+    // No permalink (WhatsApp, and any other non-web note): show the channel
+    // name instead of a dead link so the chip still reads sensibly.
+    const cl = channelLabel(s.channel)
+    if (cl) parts.push(cl)
   }
   if (parts.length === 0) parts.push('Memory note')
   return parts.join(' · ')
@@ -3901,7 +3943,7 @@ function MemoryGraph() {
                     dy={-r - 5}
                     opacity={dim ? 0.4 : 1}
                   >
-                    {n.name}
+                    {displayEntityName(n.name)}
                   </text>
                 </g>
               )
@@ -3921,7 +3963,7 @@ function MemoryGraph() {
       {selected && (
         <div className="memory-panel" style={{ maxHeight: height - 24 }}>
           <div className="memory-panel-head">
-            <strong>{selected.name}</strong>
+            <strong>{displayEntityName(selected.name)}</strong>
             <button className="memory-panel-close" onClick={() => { setSelected(null); setWiki(null) }} aria-label="Close">×</button>
           </div>
           <div className="memory-panel-meta">
