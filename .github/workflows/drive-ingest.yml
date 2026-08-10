@@ -62,11 +62,11 @@ jobs:
             '{user_email: $u, trigger: $t, force: true}')
 
           echo "POST $APP_URL/api/drive/scan-all  body=$BODY"
-          # -L follows redirects; --post30x keeps the POST + body + auth header
-          # across a 30x (a plain -L downgrades POST->GET and drops the body).
+          # -L follows redirects; --post301/302 keep the POST + body + auth header
+          # across a 301/302 (a plain -L downgrades POST->GET and drops the body).
           # -w prints the final status + effective URL so a redirect/auth wall is
           # legible instead of a bare "Redirecting..." body.
-          RESP=$(curl -sS -L --post301 --post302 --post307 \
+          RESP=$(curl -sS -L --post301 --post302 \
             -w "\nHTTP_STATUS:%{http_code} FINAL_URL:%{url_effective}" \
             -X POST "$APP_URL/api/drive/scan-all" \
             -H "Authorization: Bearer $CRON_SECRET" \

@@ -71,10 +71,10 @@ jobs:
                 + (if $f == "true" then {force: true} else {} end)')
 
           echo "POST $APP_URL/api/drive/scan-all  body=$BODY"
-          # -L + --post30x follow redirects while preserving POST+body+auth
+          # -L + --post301/302 follow redirects, preserving POST+body+auth
           # header; -w surfaces the final status/URL so an auth-wall redirect is
           # legible instead of a bare "Redirecting..." body.
-          RESP=$(curl -sS -L --post301 --post302 --post307 \
+          RESP=$(curl -sS -L --post301 --post302 \
             -w "\nHTTP_STATUS:%{http_code} FINAL_URL:%{url_effective}" \
             -X POST "$APP_URL/api/drive/scan-all" \
             -H "Authorization: Bearer $CRON_SECRET" \
