@@ -3,9 +3,13 @@ import { requireUser } from '@/lib/gmail/route-helpers'
 import { isConnectorKey, touchLastRead } from '@/lib/connectors/state'
 import { connectorMeta } from '@/lib/connectors/meta'
 import { scan as slackScan } from '@/lib/slack/service'
+import { getIngestFolders } from '@/lib/drive/service'
+import { runDriveIngest } from '@/lib/drive/ingest/pipeline'
 
 export const dynamic = 'force-dynamic'
-export const maxDuration = 60
+// Drive "Read Now" runs an in-process forced-refresh scan (reads + LLM), so give
+// it room beyond the 60s the dispatch-only paths needed.
+export const maxDuration = 300
 
 /** Fire a GitHub Actions workflow_dispatch. Returns a short outcome for the UI. */
 async function dispatchWorkflow(
@@ -89,6 +93,29 @@ export async function POST(req: NextRequest) {
       read = { attempted: true, ...(await dispatchWorkflow('whatsapp-delta.yml', {
         user_email: auth.email,
       })) }
+    } else if (meta.readKind === 'drive-ingest') {
+      // "Read Now" for a Drive-ingest card runs an out-of-cycle FORCED-REFRESH
+      // diff scan (Read Me §1): re-check every selected file, and produce a
+      // Memory Note for any that changed — even one that already got a note
+      // today (forced refresh is the one path allowed to write a second
+      // same-day note). Runs in-process, bounded; the daily scan covers scale.
+      const folders = await getIngestFolders(auth.email, connectorKey)
+      if (!folders.length) {
+        read = { attempted: true, ok: false, detail: 'No Drive folder selected to read.' }
+      } else {
+        const report = await runDriveIngest({
+          userEmail: auth.email,
+          cardId: connectorKey,
+          folderIds: folders.map((f) => f.id),
+          trigger: 'forced-refresh',
+          maxFiles: 300,
+        })
+        read = {
+          attempted: true,
+          ok: report.ok,
+          detail: `${report.filesIngested} file(s) changed, ${report.notesWritten} note(s) written`,
+        }
+      }
     }
   } catch (e) {
     read = { attempted: true, ok: false, detail: (e as Error).message }

@@ -187,6 +187,14 @@ interface Connector {
   choraleRecorderArmed?: boolean
   // Transient: the arm/disarm toggle is in flight.
   choraleRecorderBusy?: boolean
+  // Drive-ingest cards (drive-personal / drive-professional): read-only OAuth →
+  // folder selection → diff-based Memory Note ingestion (Read Me). These back
+  // the card's transient ingest UI.
+  driveIngestFolder?: string | null // human-readable path of the watched folder
+  driveIngesting?: boolean // first-connect / forced-refresh pass in flight
+  driveIngestDone?: boolean // a pass has completed at least once
+  driveNotesWritten?: number // notes written by the last pass
+  driveFilesIngested?: number // files ingested by the last pass
 }
 
 const INITIAL_CONNECTORS: Connector[] = [
@@ -1658,6 +1666,9 @@ function ConnectorsView({
   const isGmail = (c: Connector) => c.service === 'gmail' && !!c.cardId
   const isWhatsApp = (c: Connector) => c.service === 'whatsapp'
   const isSlack = (c: Connector) => c.service === 'slack' && !!c.slackCardId
+  // Drive-ingest cards use the real read-only OAuth + ingestion backend.
+  const isDriveIngest = (c: Connector) =>
+    c.key === 'drive-personal' || c.key === 'drive-professional'
 
   // Animatics Phase 1 flow modal (novel → cast → screenplay → approve).
   const [animaticsOpen, setAnimaticsOpen] = useState(false)
@@ -1861,15 +1872,32 @@ function ConnectorsView({
         } Open “Configure GDrive” and re-paste the folder link.`,
       )
     } else if (drive === 'connected') {
-      const idx = connectors.findIndex((c) => c.key === 'chorale-recorder')
+      // The callback tells us WHICH card came back. Chorale opens the write
+      // folder picker; the Drive-ingest cards open the same explorer but then
+      // save folders as ingestion roots and kick off ingestion.
+      const card = params.get('card') || 'chorale-recorder'
+      const idx = connectors.findIndex((c) => c.key === card)
       if (idx >= 0) {
-        // Mark write access granted; folder selection completes in the modal.
-        setConnectors((prev) =>
-          prev.map((x) =>
-            x.key === 'chorale-recorder' ? { ...x, choraleWriteAccess: true } : x,
-          ),
-        )
-        setDriveExplorerIdx(idx)
+        if (card === 'drive-personal' || card === 'drive-professional') {
+          // Mark connected (read access granted) and open the explorer to pick
+          // ingestion folder(s).
+          setConnectors((prev) =>
+            prev.map((x, i) =>
+              i === idx ? { ...x, connected: true, connectedEmail: x.connectedEmail } : x,
+            ),
+          )
+          persistConnectorState(card, { connected: true })
+          setDriveExplorerIdx(idx)
+        } else {
+          // Chorale: mark write access granted; folder selection completes in
+          // the modal.
+          setConnectors((prev) =>
+            prev.map((x) =>
+              x.key === 'chorale-recorder' ? { ...x, choraleWriteAccess: true } : x,
+            ),
+          )
+          setDriveExplorerIdx(idx)
+        }
       }
     } else if (drive === 'denied') {
       setDriveNotice('Google Drive access was cancelled — you did not grant write access.')
@@ -1890,6 +1918,71 @@ function ConnectorsView({
     idx: number,
     folder: { id: string; name: string; path: string },
   ) => {
+    const card = connectors[idx]?.key
+
+    // Drive-ingest cards: persist the folder as an ingestion root (Read Me §1
+    // Scope), then dispatch a first-connect ingestion pass. The card shows a
+    // lightweight "ingesting…" state driven by the response.
+    if (card === 'drive-personal' || card === 'drive-professional') {
+      setConnectors((prev) =>
+        prev.map((x, i) =>
+          i === idx
+            ? { ...x, connected: true, driveIngestFolder: folder.path || folder.name, driveIngesting: true }
+            : x,
+        ),
+      )
+      setDriveExplorerIdx(null)
+      ;(async () => {
+        try {
+          // Save the selected folder (replace the current selection with it).
+          const sel = await fetch('/api/drive/select-ingest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ card, folders: [folder], mode: 'replace' }),
+          })
+          if (!sel.ok) {
+            const p = await sel.json().catch(() => ({}))
+            throw new Error(p.error || `folder save failed (${sel.status})`)
+          }
+          // Kick off first-connection ingestion (§1: read every file in full).
+          const ing = await fetch('/api/drive/ingest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ card, trigger: 'first-connect' }),
+          })
+          const report = (await ing.json().catch(() => ({}))) as {
+            ok?: boolean
+            notesWritten?: number
+            filesIngested?: number
+            error?: string
+          }
+          if (!ing.ok && !report.notesWritten) {
+            throw new Error(report.error || `ingestion failed (${ing.status})`)
+          }
+          setConnectors((prev) =>
+            prev.map((x, i) =>
+              i === idx
+                ? {
+                    ...x,
+                    driveIngesting: false,
+                    driveIngestDone: true,
+                    driveNotesWritten: report.notesWritten ?? 0,
+                    driveFilesIngested: report.filesIngested ?? 0,
+                  }
+                : x,
+            ),
+          )
+        } catch (e) {
+          setConnectors((prev) =>
+            prev.map((x, i) => (i === idx ? { ...x, driveIngesting: false } : x)),
+          )
+          setDriveNotice(`Drive ingestion could not start: ${(e as Error).message}`)
+        }
+      })()
+      return
+    }
+
+    // Chorale write flow (unchanged).
     setConnectors((prev) =>
       prev.map((x, i) =>
         i === idx
@@ -2000,7 +2093,42 @@ function ConnectorsView({
       return
     }
 
-    // Everything else (Drive, Calendar, Babelscribe) has no backend of its
+    // Drive-ingest cards: real read-only OAuth + diff-based ingestion (Read Me).
+    if (isDriveIngest(c)) {
+      if (c.connected) {
+        // Disconnect: drop the Drive token/session for the card, then reset.
+        fetch('/api/drive/disconnect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ card: c.key }),
+        }).catch(() => {})
+        setConnectors((prev) =>
+          prev.map((x, i) =>
+            i === idx
+              ? {
+                  ...x,
+                  connected: false,
+                  connectedEmail: null,
+                  driveIngestFolder: null,
+                  driveIngesting: false,
+                  driveIngestDone: false,
+                  driveNotesWritten: undefined,
+                  driveFilesIngested: undefined,
+                }
+              : x,
+          ),
+        )
+        persistConnectorState(c.key, { connected: false })
+        return
+      }
+      // Connect: hand off to Google for read-only Drive consent. On return the
+      // app opens the folder explorer, saves the ingestion root, and runs the
+      // first-connection ingestion pass.
+      window.location.href = `/api/drive/authorize?card=${encodeURIComponent(c.key)}`
+      return
+    }
+
+    // Everything else (Calendar, Babelscribe) has no backend of its
     // own, so the toggle IS the persisted state. Flip locally, then save.
     const nextConnected = !c.connected
     setConnectors((prev) =>

@@ -18,10 +18,10 @@ import type { ConnectorKey } from './state'
  *   - 'wa-sync'     → dispatch the whatsapp sync
  *   - null          → no real read; timestamp only
  */
-export type ReadKind = 'gmail-delta' | 'slack-scan' | 'wa-sync' | null
+export type ReadKind = 'gmail-delta' | 'slack-scan' | 'wa-sync' | 'drive-ingest' | null
 
 export interface ConnectorMeta {
-  service: 'gmail' | 'slack' | 'whatsapp' | null
+  service: 'gmail' | 'slack' | 'whatsapp' | 'drive' | null
   backendOwned: boolean
   readKind: ReadKind
 }
@@ -31,7 +31,10 @@ export const CONNECTOR_META: Record<ConnectorKey, ConnectorMeta> = {
   'gmail-professional': { service: 'gmail', backendOwned: true, readKind: 'gmail-delta' },
   'slack-workspace': { service: 'slack', backendOwned: true, readKind: 'slack-scan' },
   whatsapp: { service: 'whatsapp', backendOwned: true, readKind: 'wa-sync' },
-  'drive-personal': { service: null, backendOwned: false, readKind: null },
+  // Drive-personal now runs the real read/ingest flow (Read Me): OAuth (readonly)
+  // → folder selection → diff-based Memory Note ingestion. 'Read Now' triggers a
+  // forced-refresh diff scan. drive-professional stays a toggle until wired.
+  'drive-personal': { service: 'drive', backendOwned: true, readKind: 'drive-ingest' },
   'drive-professional': { service: null, backendOwned: false, readKind: null },
   'chorale-recorder': { service: null, backendOwned: false, readKind: null },
   calendar: { service: null, backendOwned: false, readKind: null },

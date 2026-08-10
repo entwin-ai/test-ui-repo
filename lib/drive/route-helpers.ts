@@ -13,12 +13,25 @@ export async function requireUser(): Promise<{ email: string } | { error: NextRe
 }
 
 /**
- * Valid Drive-backed connector card ids. Chorale is the only one today, but the
- * flow is written generically so other Drive-write cards can reuse it.
+ * Valid Drive-backed connector card ids. Two families share the same OAuth +
+ * folder-browser flow:
+ *   • chorale-recorder            — WRITE flow (Chorale saves recordings)
+ *   • drive-personal/-professional — READ/INGEST flow (Read Me: turn Drive
+ *                                    files into Memory Notes)
+ * They differ only in the OAuth scope requested and what happens after folder
+ * selection; the authorize/callback/folders routes are generic across both.
  */
-export const DRIVE_CARDS = ['chorale-recorder'] as const
+export const DRIVE_CARDS = ['chorale-recorder', 'drive-personal', 'drive-professional'] as const
 export type DriveCardId = (typeof DRIVE_CARDS)[number]
 
 export function isDriveCard(v: unknown): v is DriveCardId {
   return typeof v === 'string' && (DRIVE_CARDS as readonly string[]).includes(v)
+}
+
+/** The cards whose Connect runs the READ/INGEST pipeline (not Chorale's write). */
+export const DRIVE_INGEST_CARDS = ['drive-personal', 'drive-professional'] as const
+export type DriveIngestCardId = (typeof DRIVE_INGEST_CARDS)[number]
+
+export function isDriveIngestCard(v: unknown): v is DriveIngestCardId {
+  return typeof v === 'string' && (DRIVE_INGEST_CARDS as readonly string[]).includes(v)
 }

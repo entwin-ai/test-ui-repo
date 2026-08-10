@@ -55,6 +55,21 @@ import crypto from 'crypto'
 // no matter how the folder is shared. To both resolve a pasted folder by id and
 // write recordings into it, we need full `drive`.
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive'
+// Read-only scope for the INGEST cards (drive-personal / drive-professional).
+// Unlike Chorale's write flow, ingestion only ever READS files inside selected
+// folders (Read Me §1 Scope), so it asks for the least privilege that still lets
+// it browse folders, read metadata, and download/export file bytes. Full
+// (readonly) is used rather than drive.file because — exactly as the write flow
+// notes — drive.file can only see files the app created or the user hands over
+// via Google's native picker, which can't browse an arbitrary existing folder
+// tree. drive.readonly is Google-"restricted" and needs consent-screen
+// verification for external users, the same trade-off already accepted here.
+const DRIVE_READONLY_SCOPE = 'https://www.googleapis.com/auth/drive.readonly'
+// Cards whose Connect runs the READ/INGEST flow (not Chorale's write flow).
+const INGEST_CARDS = new Set(['drive-personal', 'drive-professional'])
+function scopeForCard(cardId: string): string {
+  return INGEST_CARDS.has(cardId) ? DRIVE_READONLY_SCOPE : DRIVE_SCOPE
+}
 const OAUTH_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
 const OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const DRIVE_API = 'https://www.googleapis.com/drive/v3'
@@ -81,6 +96,14 @@ interface DriveSession {
   refreshToken?: string
   expiresAt?: number // unix ms
   writeAccess?: boolean
+  /** Whether the token carries at least drive.readonly (the ingest cards). */
+  readAccess?: boolean
+  /**
+   * Folders the user picked as ingestion roots for an INGEST card (Read Me §1
+   * Scope). Multiple allowed (My Drive subfolder + a Shared Drive folder, …).
+   * Chorale uses the single `selectedFolder` above; ingest cards use this list.
+   */
+  ingestFolders?: SelectedFolder[]
   /**
    * The raw OAuth `scope` string Google granted for this token. Used to detect
    * a stale token minted under an older, narrower scope (e.g. drive.file) so we
@@ -283,9 +306,10 @@ export async function buildAuthUrl(
     client_id: clientId,
     redirect_uri: redirectUri(),
     response_type: 'code',
-    // Identity + Drive write (per-file). include_granted_scopes keeps any Gmail
+    // Identity + the right Drive scope for this card: readonly for the ingest
+    // cards, full write for Chorale. include_granted_scopes keeps any Gmail
     // scope already granted on the same account.
-    scope: `openid email ${DRIVE_SCOPE}`,
+    scope: `openid email ${scopeForCard(cardId)}`,
     prompt: 'select_account consent',
     access_type: 'offline',
     include_granted_scopes: 'true',
@@ -339,6 +363,10 @@ export async function handleCallback(
   // on the consent screen, `scope` won't contain it and we must not claim write
   // access.
   const grantedWrite = (tok.scope || '').includes(DRIVE_SCOPE)
+  // Read access is granted by EITHER the full write scope or the readonly scope
+  // (write implies read). The ingest cards only need this.
+  const grantedRead =
+    grantedWrite || (tok.scope || '').includes(DRIVE_READONLY_SCOPE)
 
   let connectedEmail: string | undefined
   try {
@@ -357,6 +385,7 @@ export async function handleCallback(
   sess.expiresAt = Date.now() + tok.expires_in * 1000
   sess.connectedEmail = connectedEmail
   sess.writeAccess = grantedWrite
+  sess.readAccess = grantedRead
   sess.grantedScope = tok.scope || ''
   await saveSession(flow.userEmail, flow.cardId, sess)
 
@@ -902,4 +931,157 @@ export async function status(userEmail: string, cardId: string): Promise<DriveSt
 export async function disconnect(userEmail: string, cardId: string): Promise<void> {
   sessions.delete(keyFor(userEmail, cardId))
   await deleteStore(userEmail, cardId)
+}
+
+/* ===========================================================================
+ * Drive INGEST support (Read Me — read/diff/download for drive-personal /
+ * drive-professional). These sit alongside Chorale's write flow and reuse the
+ * same session/token machinery above; they only READ.
+ * ========================================================================= */
+
+/** Public token accessor for the ingest pipeline (refreshes if near expiry). */
+export async function getDriveAccessToken(userEmail: string, cardId: string): Promise<string> {
+  const sess = await getSession(userEmail, cardId)
+  if (sess.state !== 'connected') throw new Error('Drive is not connected for this card')
+  return ensureAccessToken(userEmail, cardId, sess)
+}
+
+/** Persist the folders the user chose as ingestion roots for an ingest card. */
+export async function setIngestFolders(
+  userEmail: string,
+  cardId: string,
+  folders: SelectedFolder[],
+): Promise<void> {
+  const sess = await getSession(userEmail, cardId)
+  if (sess.state !== 'connected') throw new Error('Drive is not connected for this card')
+  sess.ingestFolders = folders
+  await saveSession(userEmail, cardId, sess)
+}
+
+/** Read back the selected ingestion roots for a card (empty if none yet). */
+export async function getIngestFolders(
+  userEmail: string,
+  cardId: string,
+): Promise<SelectedFolder[]> {
+  const sess = await getSession(userEmail, cardId)
+  return sess.ingestFolders ?? []
+}
+
+/**
+ * A file discovered under a selected folder, with the change-detection metadata
+ * the ledger diff needs (Read Me §1). parentFolderId is the immediate parent so
+ * the ledger can record which selected root it came from.
+ */
+export interface DriveFileEntry {
+  id: string
+  name: string
+  mimeType: string
+  modifiedTime?: string
+  version?: string
+  md5Checksum?: string
+  webViewLink?: string
+  parentFolderId?: string
+}
+
+/**
+ * Recursively enumerate every non-folder file inside `rootFolderId` and its
+ * subfolders (Read Me §1 Scope — only inside a selected folder). Folders are
+ * traversed but not returned as ingestible files. Shared-drive aware. Bounded
+ * by page and depth caps so a pathological tree can't loop unbounded.
+ */
+export async function listFilesInFolderTree(
+  accessToken: string,
+  rootFolderId: string,
+): Promise<DriveFileEntry[]> {
+  const FOLDER_MIME = 'application/vnd.google-apps.folder'
+  const out: DriveFileEntry[] = []
+  const queue: string[] = [rootFolderId]
+  const visited = new Set<string>()
+  let foldersProcessed = 0
+  const MAX_FOLDERS = 500 // depth+breadth guard
+
+  while (queue.length && foldersProcessed < MAX_FOLDERS) {
+    const parent = queue.shift() as string
+    if (visited.has(parent)) continue
+    visited.add(parent)
+    foldersProcessed++
+
+    let pageToken: string | undefined
+    let pages = 0
+    do {
+      const url = new URL(`${DRIVE_API}/files`)
+      url.searchParams.set('q', `'${parent}' in parents and trashed = false`)
+      url.searchParams.set(
+        'fields',
+        'files(id,name,mimeType,modifiedTime,version,md5Checksum,webViewLink),nextPageToken',
+      )
+      url.searchParams.set('pageSize', '100')
+      url.searchParams.set('spaces', 'drive')
+      url.searchParams.set('supportsAllDrives', 'true')
+      url.searchParams.set('includeItemsFromAllDrives', 'true')
+      if (pageToken) url.searchParams.set('pageToken', pageToken)
+
+      const res = await fetch(url.toString(), {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '')
+        throw new Error(`Drive tree list failed: ${res.status} ${detail}`)
+      }
+      const page = (await res.json()) as {
+        files?: {
+          id: string
+          name: string
+          mimeType: string
+          modifiedTime?: string
+          version?: string
+          md5Checksum?: string
+          webViewLink?: string
+        }[]
+        nextPageToken?: string
+      }
+      for (const f of page.files ?? []) {
+        if (f.mimeType === FOLDER_MIME) {
+          queue.push(f.id) // recurse into subfolders
+        } else {
+          out.push({
+            id: f.id,
+            name: f.name,
+            mimeType: f.mimeType,
+            modifiedTime: f.modifiedTime,
+            version: f.version,
+            md5Checksum: f.md5Checksum,
+            webViewLink: f.webViewLink,
+            parentFolderId: parent,
+          })
+        }
+      }
+      pageToken = page.nextPageToken
+      pages++
+      if (pages >= 50) break
+    } while (pageToken)
+  }
+  return out
+}
+
+/**
+ * Download a Drive file's bytes. For a Google-native type pass `exportMime` and
+ * we hit the /export endpoint (Docs->docx, Sheets->xlsx, Slides->pptx); for a
+ * binary file leave it undefined and we use ?alt=media. Shared-drive aware.
+ */
+export async function downloadDriveFile(
+  accessToken: string,
+  fileId: string,
+  exportMime?: string,
+): Promise<Uint8Array> {
+  const url = exportMime
+    ? `${DRIVE_API}/files/${fileId}/export?mimeType=${encodeURIComponent(exportMime)}`
+    : `${DRIVE_API}/files/${fileId}?alt=media&supportsAllDrives=true`
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(`Drive download failed (${res.status})${detail ? `: ${detail.slice(0, 160)}` : ''}`)
+  }
+  const buf = await res.arrayBuffer()
+  return new Uint8Array(buf)
 }

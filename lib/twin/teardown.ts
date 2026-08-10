@@ -8,9 +8,14 @@ import { getSupabaseAdmin } from '@/lib/rag/supabase'
  * never from request input).
  *
  * What it removes:
- *   1. Supabase — every row in every table keyed by user_email (ingested
- *      email/slack/whatsapp messages, memory notes + chunks, entities +
- *      mentions, rollups, cost log, sync_state, connector_state/settings).
+ *   1. Supabase — every row in every table keyed by user_email: chat history
+ *      (chat_session/chat_message), ingested email/slack/whatsapp messages,
+ *      memory notes + chunks, entities + mentions + note_ownership, daily
+ *      rollups, sender_classification, the whatsapp metadata/classification
+ *      tables (entity/classification/capability_probe), the Google Drive
+ *      per-file diff ledger (drive_file), cost log, sync_state and
+ *      connector_state. USER_TABLES below must stay in sync with the schema:
+ *      every table carrying a user_email column has to be listed there.
  *   2. Redis (Upstash) — the encrypted LLM API key, and all channel session
  *      credentials/tokens (Gmail x2, Slack, WhatsApp creds/keys/paircode).
  *   3. Scheduled services — deleting the sync_state rows (step 1) is what
@@ -160,17 +165,36 @@ async function cancelInFlightRuns(userEmail: string): Promise<CancelResult> {
 }
 
 
-// (entity_mention/note_chunk -> memory_note -> email_message; entity_mention ->
-// entity). Deleting by user_email in this order is safe regardless of cascades.
+// Ordered children-before-parents so a delete-by-user_email is safe regardless
+// of whether a given FK has ON DELETE CASCADE. Known FK edges (all cascade
+// unless noted): chat_message -> chat_session; note_ownership -> memory_note,
+// entity; entity_mention -> memory_note, email/slack/whatsapp_message, entity;
+// note_chunk -> memory_note. Leaf/reference tables (rollups, cost log,
+// sync_state, connector_state, sender_classification, whatsapp_* metadata) have
+// no inbound user-data FKs and can go anywhere. This list must cover EVERY table
+// with a user_email column — the schema currently has 18 such tables (see
+// supabase/migrations); missing one strands that user's data on teardown.
 const USER_TABLES = [
+  // chat history (0020): message references session (cascade) -> delete first
+  'chat_message',
+  'chat_session',
+  // note/entity graph: ownership + mentions + chunks reference notes/entities
+  'note_ownership',
   'entity_mention',
   'note_chunk',
   'memory_note',
   'daily_rollup',
+  // ingested source messages (referenced by entity_mention, already gone above)
   'email_message',
   'slack_message',
   'whatsapp_message',
   'entity',
+  // per-user classification + connector/sync/cost state (no inbound FKs)
+  'sender_classification',
+  'whatsapp_entity',
+  'whatsapp_classification',
+  'whatsapp_capability_probe',
+  'drive_file',
   'llm_cost_log',
   'sync_state',
   'connector_state',
