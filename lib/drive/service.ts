@@ -46,6 +46,11 @@
  */
 
 import crypto from 'crypto'
+import {
+  upsertConnectorState,
+  getConnectorState,
+  type ConnectorKey,
+} from '@/lib/connectors/state'
 
 // Full Drive scope. `drive.file` is narrower and preferable, BUT it can only
 // see files/folders the app itself created or that the user hands over through
@@ -952,10 +957,26 @@ export async function setIngestFolders(
   cardId: string,
   folders: SelectedFolder[],
 ): Promise<void> {
-  const sess = await getSession(userEmail, cardId)
-  if (sess.state !== 'connected') throw new Error('Drive is not connected for this card')
-  sess.ingestFolders = folders
-  await saveSession(userEmail, cardId, sess)
+  // Durable source of truth: connector_state.settings.driveFolders (survives
+  // serverless restarts, missing Redis, and is what the daily-scan cron reads).
+  // Merge into the EXISTING settings so we don't reset the user's pollHours /
+  // backfill knobs — upsertConnectorState replaces the whole settings object.
+  const existing = await getConnectorState(userEmail, cardId as ConnectorKey).catch(() => null)
+  await upsertConnectorState(userEmail, cardId as ConnectorKey, {
+    connected: true,
+    settings: { ...(existing?.settings ?? {}), driveFolders: folders },
+  })
+  // Best-effort fast mirror onto the OAuth session too (used within a single
+  // request lifetime), but never the sole store.
+  try {
+    const sess = await getSession(userEmail, cardId)
+    if (sess.state === 'connected') {
+      sess.ingestFolders = folders
+      await saveSession(userEmail, cardId, sess)
+    }
+  } catch {
+    /* session mirror is optional */
+  }
 }
 
 /** Read back the selected ingestion roots for a card (empty if none yet). */
@@ -963,6 +984,17 @@ export async function getIngestFolders(
   userEmail: string,
   cardId: string,
 ): Promise<SelectedFolder[]> {
+  // Read from the durable store first; fall back to the session mirror only if
+  // the DB has nothing (e.g. a very old session written before this change).
+  try {
+    const state = await getConnectorState(userEmail, cardId as ConnectorKey)
+    const fromDb = state?.settings?.driveFolders
+    if (fromDb && fromDb.length) {
+      return fromDb.map((f) => ({ id: f.id, name: f.name, path: f.path || f.name }))
+    }
+  } catch {
+    /* fall through to session mirror */
+  }
   const sess = await getSession(userEmail, cardId)
   return sess.ingestFolders ?? []
 }

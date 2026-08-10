@@ -1502,11 +1502,22 @@ function DriveExplorerModal({
     setTrail((t) => t.slice(0, idx + 1))
   }
 
-  // Commit the current folder as the Chorale destination.
+  // Commit the current folder. Chorale persists it as its single write
+  // destination via /api/drive/select; the Drive-ingest cards persist via
+  // /api/drive/select-ingest (done in the card's onSelect handler), so for those
+  // we skip the Chorale route entirely and just hand the folder back.
   const useThisFolder = async () => {
+    const folder = { id: current.id, name: current.name, path: pathString }
+
+    // Drive-ingest cards: the handler saves to /api/drive/select-ingest and runs
+    // ingestion. Don't call the Chorale write route here.
+    if (card === 'drive-personal' || card === 'drive-professional') {
+      onSelect(folder)
+      return
+    }
+
     setSaving(true)
     setError(null)
-    const folder = { id: current.id, name: current.name, path: pathString }
     try {
       // Persist server-side. Best-effort: if it fails we still hand the folder
       // to the card so the flow isn't blocked, and surface a soft error.

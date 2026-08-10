@@ -42,6 +42,15 @@ export interface ConnectorSettings {
   pollHours: number
   backfillDays: number
   totalWindowDays: number
+  /**
+   * Drive-ingest cards only: the folder(s) the user chose as ingestion roots
+   * (Read Me §1 Scope). Stored here in connector_state.settings (jsonb, durable,
+   * per-user) rather than in the ephemeral Drive OAuth session, so both the
+   * connect-time ingest AND the daily-scan cron read the SAME persisted source —
+   * a serverless instance without the in-memory session (or without Redis) still
+   * knows which folders to read. Empty/absent for non-Drive cards.
+   */
+  driveFolders?: { id: string; name: string; path: string }[]
 }
 
 export const DEFAULT_SETTINGS: ConnectorSettings = {
@@ -88,10 +97,26 @@ export function sanitizeSettings(input: unknown): ConnectorSettings {
   // The rolling window can never be shorter than the one-time backfill — that
   // would mean indexing less history than was initially pulled. Floor it.
   if (totalWindowDays < backfillDays) totalWindowDays = backfillDays
+
+  // Drive-ingest folders: keep only well-formed {id,name,path} entries, cap the
+  // count, and drop anything else. Absent -> undefined (non-Drive cards).
+  let driveFolders: ConnectorSettings['driveFolders']
+  const rawFolders = (src as { driveFolders?: unknown }).driveFolders
+  if (Array.isArray(rawFolders)) {
+    driveFolders = rawFolders
+      .filter(
+        (f): f is { id: string; name: string; path?: string } =>
+          !!f && typeof f === 'object' && typeof (f as { id?: unknown }).id === 'string' && typeof (f as { name?: unknown }).name === 'string',
+      )
+      .slice(0, 25)
+      .map((f) => ({ id: f.id, name: f.name, path: typeof f.path === 'string' && f.path ? f.path : f.name }))
+  }
+
   return {
     pollHours: clampInt(src.pollHours, BOUNDS.pollHours.min, BOUNDS.pollHours.max, DEFAULT_SETTINGS.pollHours),
     backfillDays,
     totalWindowDays,
+    ...(driveFolders && driveFolders.length ? { driveFolders } : {}),
   }
 }
 
