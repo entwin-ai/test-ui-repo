@@ -1,0 +1,80 @@
+name: drive-scan
+run-name: drive-scan · ${{ github.event.inputs.user_email && format('entwin-user:{0}', github.event.inputs.user_email) || 'all' }}
+
+# Recurring Google Drive "once-per-day scan" (Google Drive Ingestion Read Me §1).
+#
+# WHY THIS ONE IS DIFFERENT FROM delta.yml / *-sync.yml:
+# The Gmail/Slack/WhatsApp crons run the worker/ codebase directly. Drive's
+# ingestion pipeline lives in the Next.js APP (lib/drive/ingest/*), reachable
+# over HTTP, so this cron does not run worker code — it simply POSTs the app's
+# /api/drive/scan-all endpoint, which does the per-user work (read → diff →
+# extract → summarize → resolve → persist).
+#
+# HEARTBEAT vs PER-USER CADENCE:
+# On the scheduled tick this cron is only a HEARTBEAT. The endpoint inspects
+# every Drive account (sync_state.channel='drive') and runs a daily-scan for one
+# ONLY if that user's chosen "Reading frequency" (pollHours in
+# connector_state.settings) has elapsed since sync_state.last_delta_at. So one
+# schedule serves every user's own cadence — see app/api/drive/scan-all/route.ts.
+#
+# ON-DEMAND: the app also runs a forced-refresh scan directly (no workflow) when
+# the user clicks "Read Now" in the card's settings.
+#
+# Hourly, because the smallest selectable frequency is 1 hour; a finer tick would
+# just skip most accounts every time.
+#
+# CAVEAT: GitHub cron is best-effort — runs can be delayed 15-30+ min or skipped
+# under load, and the schedule auto-DISABLES after 60 days of repo inactivity.
+on:
+  schedule:
+    - cron: '45 * * * *' # three-quarters past the hour, offset from the other syncs
+  workflow_dispatch:
+    inputs:
+      user_email:
+        description: 'Scope the scan to a single user (on-demand). Blank = all due accounts.'
+        required: false
+        default: ''
+      force:
+        description: 'Bypass the per-user pollHours cadence gate and scan now.'
+        required: false
+        default: 'false'
+
+concurrency:
+  # A per-user on-demand run gets its own group so it never queues behind (or
+  # cancels) the all-accounts heartbeat, and vice-versa.
+  group: drive-scan-${{ github.event.inputs.user_email || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Trigger Drive daily scan
+        env:
+          # The app base URL and the shared cron secret. Both are repo secrets;
+          # CRON_SECRET must match the value set in the app's server environment.
+          APP_URL: ${{ secrets.APP_BASE_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          ONLY_USER: ${{ github.event.inputs.user_email }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          if [ -z "$APP_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "APP_BASE_URL and CRON_SECRET must be set as repo secrets." >&2
+            exit 1
+          fi
+          # Build the JSON body: optional single-user scope + force flag.
+          BODY=$(jq -nc \
+            --arg u "$ONLY_USER" \
+            --arg f "$FORCE" \
+            '{} + (if $u == "" then {} else {user_email: $u} end)
+                + (if $f == "true" then {force: true} else {} end)')
+
+          echo "POST $APP_URL/api/drive/scan-all  body=$BODY"
+          # --fail-with-body so a non-2xx makes the step fail AND prints why.
+          HTTP=$(curl -sS --fail-with-body \
+            -X POST "$APP_URL/api/drive/scan-all" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$BODY") || { echo "scan-all call failed: $HTTP" >&2; exit 1; }
+          echo "$HTTP"

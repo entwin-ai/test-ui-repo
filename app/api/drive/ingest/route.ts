@@ -54,11 +54,14 @@ export async function POST(req: NextRequest) {
 
   // 1. Ensure the sync_state row (idempotent). Drive has no sender-calibration
   //    step, so onboarding goes straight to 'confirmed' — there is no Kanban
-  //    handshake for Drive.
+  //    handshake for Drive. channel='drive' keeps these rows out of the Gmail
+  //    delta cron's sweep (which filters channel='gmail') and lets the Drive
+  //    daily-scan cron find them.
   const { error: upErr } = await getSupabaseAdmin().from('sync_state').upsert(
     {
       user_email: auth.email,
       card_id: card,
+      channel: 'drive',
       backfill_done: trigger === 'first-connect' ? false : true,
       onboard_phase: 'confirmed',
     },
@@ -81,11 +84,17 @@ export async function POST(req: NextRequest) {
     })
 
     // Mark the backfill done once a first-connect pass completes without a hard
-    // failure, so the daily scan takes over in diff mode from here.
+    // failure, so the daily scan takes over in diff mode from here. Stamp
+    // last_delta_at too — it's the per-user cadence anchor the daily-scan cron
+    // compares against pollHours to decide if a user is "due".
     if (trigger === 'first-connect' && report.ok) {
       await getSupabaseAdmin()
         .from('sync_state')
-        .update({ backfill_done: true, updated_at: new Date().toISOString() })
+        .update({
+          backfill_done: true,
+          last_delta_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
         .eq('user_email', auth.email)
         .eq('card_id', card)
     }
