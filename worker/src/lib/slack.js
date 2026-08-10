@@ -36,14 +36,21 @@ async function slackCall(token, method, params) {
 }
 
 // Enumerate every conversation the user can read (public/private/mpim/im).
-export async function listConversations(token) {
+//
+// Slack Ingestion Read Me §4: archiving is a LIVE state Entwin reads directly,
+// and an archived entity is the Ignore tier (write nothing). We therefore do NOT
+// pass exclude_archived — we WANT archived conversations in the list so the
+// classifier can read their live `is_archived` flag and route them to Ignore,
+// rather than silently never seeing them. (An archived channel that later
+// unarchives then reappears naturally.)
+export async function listConversations(token, { includeArchived = true } = {}) {
   const out = [];
   let cursor = '';
   let pages = 0;
   do {
     const resp = await slackCall(token, 'conversations.list', {
       types: 'public_channel,private_channel,mpim,im',
-      exclude_archived: true,
+      exclude_archived: includeArchived ? false : true,
       limit: 200,
       cursor: cursor || undefined,
     });

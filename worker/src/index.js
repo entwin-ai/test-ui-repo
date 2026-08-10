@@ -17,7 +17,12 @@ import { ingestWhatsappBackfill, ingestWhatsappDelta, reprocessEntityAsImportant
 import { captureWhatsapp } from './pipeline/whatsapp-capture.js';
 import { probeWhatsapp } from './pipeline/whatsapp-probe.js';
 import { getSlackSession } from './lib/redis-slack.js';
-import { captureSlack, ingestSlackBackfill, ingestSlackDelta } from './pipeline/slack.js';
+import {
+  captureSlack,
+  ingestSlackBackfill,
+  ingestSlackDelta,
+  reprocessSlackEntityAsImportant,
+} from './pipeline/slack.js';
 import { backfillEntities } from './entity-backfill.js';
 import { runPool } from './lib/pool.js';
 import { deltaDue, markDeltaRan, backfillDaysFor } from './lib/schedule.js';
@@ -413,14 +418,56 @@ async function main() {
 
         // 2. VECTORIZE: first run backfills the month, later runs do delta.
         //    Both only touch processed_at IS NULL rows, so re-runs are safe.
+        //    authedUser (Slack user id) is passed so the deterministic @mention
+        //    failsafe (Read Me §6) can spot <@Uxxxx> in Updates channel-days.
         if (!acct.backfill_done) {
-          await ingestSlackBackfill(acct, provider, token, runPool, CONCURRENCY);
+          await ingestSlackBackfill(acct, provider, token, runPool, CONCURRENCY, session.authedUser);
         } else {
-          await ingestSlackDelta(acct, provider, token, runPool, CONCURRENCY);
+          await ingestSlackDelta(acct, provider, token, runPool, CONCURRENCY, session.authedUser);
         }
         console.log(`[${acct.user_email}/${acct.card_id}] slack-sync done`);
       } catch (err) {
         console.error(`[${acct.user_email}/${acct.card_id}] slack-sync failed:`, err.message);
+      }
+    }
+    return;
+  }
+
+  // ---- Slack move-backfill (Kanban Updates -> Important) --------------------
+  // Dispatched by PATCH /api/slack/entities when the user moves a Slack entity
+  // from Updates to Important on the Kanban (Read Me §8). Re-expands every past
+  // gist day into full facet-split Memory Notes, scoped to one entity.
+  if (MODE === 'slack-move-backfill') {
+    if (!ONLY_IDENTITY_KEY) {
+      console.log('slack-move-backfill requires ONLY_IDENTITY_KEY — skipping');
+      return;
+    }
+    const list = await accounts('slack');
+    console.log(`MODE=slack-move-backfill key=${ONLY_IDENTITY_KEY} accounts=${list.length}`);
+    for (const acct of list) {
+      try {
+        const session = await getSlackSession(acct.user_email, acct.card_id);
+        if (!session || session.state !== 'connected' || !session.accessToken) {
+          console.log(`[${acct.user_email}/${acct.card_id}] no connected Slack session — skipping`);
+          continue;
+        }
+        const llmConfig = await getLlmConfig(acct.user_email);
+        if (!llmConfig) {
+          console.log(`[${acct.user_email}/${acct.card_id}] no LLM key set — skipping`);
+          continue;
+        }
+        const provider = makeProvider(llmConfig);
+        await reprocessSlackEntityAsImportant(
+          acct,
+          provider,
+          session.accessToken,
+          ONLY_IDENTITY_KEY,
+          runPool,
+          CONCURRENCY,
+        );
+        console.log(`[${acct.user_email}/${acct.card_id}] slack-move-backfill done`);
+      } catch (err) {
+        console.error(`[${acct.user_email}/${acct.card_id}] slack-move-backfill failed:`, err.message);
       }
     }
     return;

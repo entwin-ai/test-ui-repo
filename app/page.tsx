@@ -13,7 +13,7 @@ import { LOGO_DATA_URI } from './logo'
 import AnimaticsFlow from './animatics-flow'
 
 type ViewKey = 'chat' | 'allchats' | 'connectors' | 'dashboard' | 'memory' | 'settings'
-type DashTab = 'overview' | 'kanban' | 'wa-kanban' | 'entities'
+type DashTab = 'overview' | 'kanban' | 'wa-kanban' | 'slack-kanban' | 'entities'
 type ListKey = 'marketing' | 'updates' | 'people'
 type ProviderKey = 'claude' | 'gemini' | 'openai' | 'neocloud' | 'onprem'
 
@@ -3152,6 +3152,166 @@ function WhatsAppKanbanPanel() {
   )
 }
 
+// ---------------------------------------------------------------------------
+// Slack Kanban (Slack Ingestion Read Me §8). Two columns — Updates and Important
+// Slack Entities. Archived entities are the Ignore tier and never appear here
+// (Read Me §4). Given likely volume across channels, group chats, and external
+// connections, the board has a search field and each column scrolls (Read Me §8).
+// ---------------------------------------------------------------------------
+interface SlackEntity {
+  identityKey: string
+  type: 'individual' | 'group_chat' | 'closed_channel' | 'public_channel' | 'external'
+  name: string
+  tier: 'updates' | 'important'
+  isNew: boolean
+  reason: string | null
+  externalShape: 'dm' | 'org' | 'channel' | null
+}
+
+const SLACK_TIER_LABELS: Record<'updates' | 'important', string> = {
+  updates: 'Updates',
+  important: 'Important Slack Entities',
+}
+
+const SLACK_TYPE_LABELS: Record<SlackEntity['type'], string> = {
+  individual: 'individual',
+  group_chat: 'group chat',
+  closed_channel: 'private channel',
+  public_channel: 'public channel',
+  external: 'external',
+}
+
+// Move-effect notes shown when an entity is dragged (Read Me §8, two-bucket form).
+const SLACK_MOVE_RULES: Record<string, string> = {
+  'updates>important':
+    'Backfill: a full facet-split Memory Note will be created for every past day this entity was in Updates, dated to each day\u2019s original messages. This can take a while for a busy channel.',
+  'important>updates':
+    'No deletion. Existing Memory Notes stand untouched. New days from this entity will log into the Slack Updates Note instead (one-line gist).',
+}
+
+function SlackKanbanPanel() {
+  const [items, setItems] = useState<SlackEntity[]>([])
+  const [loading, setLoading] = useState(true)
+  const [query, setQuery] = useState('')
+  const [moveNote, setMoveNote] = useState('')
+  const draggedKey = useRef<string | null>(null)
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/slack/entities')
+      const data = await res.json().catch(() => ({ updates: [], important: [] }))
+      const merged: SlackEntity[] = [...(data.updates || []), ...(data.important || [])]
+      setItems(merged)
+    } catch {
+      setItems([])
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { load() }, [])
+
+  const anyUnconfirmed = items.some((i) => i.isNew)
+
+  const drop = async (tier: 'updates' | 'important') => {
+    const key = draggedKey.current
+    draggedKey.current = null
+    if (!key) return
+    const ent = items.find((i) => i.identityKey === key)
+    if (!ent || ent.tier === tier) return
+    const ruleKey = `${ent.tier}>${tier}`
+    if (SLACK_MOVE_RULES[ruleKey]) setMoveNote(`${ent.name}: ${SLACK_MOVE_RULES[ruleKey]}`)
+    setItems((prev) => prev.map((i) => (i.identityKey === key ? { ...i, tier, isNew: false } : i)))
+    try {
+      await fetch('/api/slack/entities', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identityKey: key, tier }),
+      })
+    } catch { /* non-fatal; refetch on next load */ }
+  }
+
+  const confirmAll = async () => {
+    setItems((prev) => prev.map((i) => ({ ...i, isNew: false })))
+    try {
+      await fetch('/api/slack/entities', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmAll: true }),
+      })
+    } catch { /* non-fatal */ }
+  }
+
+  const q = query.trim().toLowerCase()
+  const visible = q
+    ? items.filter((i) => i.name.toLowerCase().includes(q) || i.identityKey.toLowerCase().includes(q))
+    : items
+
+  return (
+    <div className="dash-panel active" id="dash-slack-kanban">
+      {anyUnconfirmed && (
+        <div className="kanban-banner" id="slack-kanban-banner">
+          <div className="kanban-banner-text">New Slack entities are highlighted. Drag any miscategorized entity to the right column, then confirm. Moving a channel from Updates to Important re-expands its past days into full notes.</div>
+          <button className="kanban-confirm-btn" onClick={confirmAll}>Confirm classification</button>
+        </div>
+      )}
+      <div className="kanban-search-row">
+        <input
+          className="kanban-search"
+          type="text"
+          placeholder="Search Slack entities..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+      </div>
+      {loading ? (
+        <div className="entity-empty">Loading Slack entities...</div>
+      ) : items.length === 0 ? (
+        <div className="entity-empty">No Slack entities classified yet. They appear here as Slack is ingested. Archived channels are never shown.</div>
+      ) : (
+      <div className="kanban-board kanban-board-two" id="slack-kanban-board">
+        {(['updates', 'important'] as ('updates' | 'important')[]).map((tier) => {
+          const cards = visible.filter((i) => i.tier === tier)
+          return (
+            <div
+              className="kanban-column kanban-column-scroll"
+              key={tier}
+              onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('drag-over') }}
+              onDragLeave={(e) => e.currentTarget.classList.remove('drag-over')}
+              onDrop={(e) => { e.currentTarget.classList.remove('drag-over'); drop(tier) }}
+            >
+              <div className="kanban-column-header">
+                <span>{SLACK_TIER_LABELS[tier]}</span>
+                <span className="kanban-column-count">{cards.length}</span>
+              </div>
+              <div className="kanban-cards">
+                {cards.map((i) => (
+                  <div
+                    className={`kanban-card${i.isNew ? ' is-new' : ''}`}
+                    key={i.identityKey}
+                    draggable
+                    onDragStart={(e) => { draggedKey.current = i.identityKey; e.currentTarget.classList.add('dragging') }}
+                    onDragEnd={(e) => e.currentTarget.classList.remove('dragging')}
+                  >
+                    <div className="kanban-card-name">{i.name}</div>
+                    <div className="kanban-card-meta">
+                      <span className="kanban-tag">{SLACK_TYPE_LABELS[i.type] || i.type}</span>
+                      {i.type === 'external' && i.externalShape ? <span className="kanban-tag">connect: {i.externalShape}</span> : null}
+                    </div>
+                    {i.isNew && <div className="kanban-card-new-tag">New</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+      )}
+      <div className={`kanban-move-note${moveNote ? ' show' : ''}`} id="slack-kanban-move-note">{moveNote}</div>
+    </div>
+  )
+}
+
 interface PendingEntity { id: string; name: string; aliases: string[]; candidateId: string | null; candidateName: string | null; score: number | null; references: number; newPhone?: string | null; prevPhone?: string | null; isNumberChange?: boolean }
 interface SearchEntity { id: string; name: string; aliases: string[]; type?: string }
 
@@ -3567,6 +3727,7 @@ function DashboardView({ connectedCount, total, entities, setEntities }: { conne
         <button className={`subtab-btn${tab === 'overview' ? ' active' : ''}`} onClick={() => setTab('overview')}>Overview</button>
         <button className={`subtab-btn${tab === 'kanban' ? ' active' : ''}`} onClick={() => setTab('kanban')}>Sender Kanban</button>
         <button className={`subtab-btn${tab === 'wa-kanban' ? ' active' : ''}`} onClick={() => setTab('wa-kanban')}>WhatsApp Kanban</button>
+        <button className={`subtab-btn${tab === 'slack-kanban' ? ' active' : ''}`} onClick={() => setTab('slack-kanban')}>Slack Kanban</button>
         <button className={`subtab-btn${tab === 'entities' ? ' active' : ''}`} onClick={() => setTab('entities')}>
           Entity Review{pendingCount > 0 && <span className="subtab-badge" id="entity-badge">{pendingCount}</span>}
         </button>
@@ -3575,6 +3736,7 @@ function DashboardView({ connectedCount, total, entities, setEntities }: { conne
         {tab === 'overview' && <OverviewPanel connectedCount={connectedCount} total={total} alertVisible={alertVisible} dismissAlert={() => setAlertVisible(false)} />}
         {tab === 'kanban' && <KanbanPanel />}
         {tab === 'wa-kanban' && <WhatsAppKanbanPanel />}
+        {tab === 'slack-kanban' && <SlackKanbanPanel />}
         {tab === 'entities' && <EntitiesPanel entities={entities} setEntities={setEntities} />}
       </div>
     </>
