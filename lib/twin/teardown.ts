@@ -16,8 +16,10 @@ import { getSupabaseAdmin } from '@/lib/rag/supabase'
  *      per-file diff ledger (drive_file), cost log, sync_state and
  *      connector_state. USER_TABLES below must stay in sync with the schema:
  *      every table carrying a user_email column has to be listed there.
- *   2. Redis (Upstash) — the encrypted LLM API key, and all channel session
- *      credentials/tokens (Gmail x2, Slack, WhatsApp creds/keys/paircode).
+ *   2. Redis (Upstash) — the encrypted LLM API key, the cached profile, all
+ *      channel session credentials/tokens (Gmail x2, Slack, Drive x2, WhatsApp
+ *      creds/keys/paircode), and the Animatics pipeline state (job blob, every
+ *      character headshot, and the owner index).
  *   3. Scheduled services — deleting the sync_state rows (step 1) is what
  *      actually decommissions the user's scheduled work: the delta/sync GitHub
  *      Actions crons enumerate sync_state, so with no rows the user is never
@@ -55,6 +57,18 @@ async function redisDel(keys: string[]): Promise<void> {
   if (!res.ok) throw new Error(`Redis DEL failed (${res.status})`)
 }
 
+async function redisGet(key: string): Promise<string | null> {
+  if (!REDIS_ENABLED) return null
+  const res = await fetch(REDIS_URL as string, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${REDIS_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(['GET', key]),
+  })
+  if (!res.ok) throw new Error(`Redis GET failed (${res.status})`)
+  const json = (await res.json()) as { result?: unknown }
+  return (json.result as string | null) ?? null
+}
+
 const sha24 = (s: string) => crypto.createHash('sha256').update(s.toLowerCase()).digest('hex').slice(0, 24)
 
 /**
@@ -65,20 +79,62 @@ const sha24 = (s: string) => crypto.createHash('sha256').update(s.toLowerCase())
  *   lib/twin/profile.ts        entwin:profile:<sha256("profile::"+email)>
  *   lib/gmail/service.ts       entwin:gmail:<sha256(email::card)>
  *   lib/slack/service.ts       entwin:slack:<sha256(email::card)>
+ *   lib/drive/service.ts       entwin:drive:<sha256(email::card)>
  *   lib/whatsapp/service.ts    entwin:wa:{creds,keys,paircode}:<sha256(email)>
  */
 function redisKeysForUser(email: string): string[] {
   const gmailCards = ['gmail-personal', 'gmail-professional']
   const slackCards = ['slack-workspace']
+  const driveCards = ['drive-personal', 'drive-professional']
   const keys: string[] = [
     `entwin:llm:${sha24(`llm::${email}`)}`,
     `entwin:profile:${sha24(`profile::${email}`)}`,
     ...gmailCards.map((c) => `entwin:gmail:${sha24(`${email}::${c}`)}`),
     ...slackCards.map((c) => `entwin:slack:${sha24(`${email}::${c}`)}`),
+    ...driveCards.map((c) => `entwin:drive:${sha24(`${email}::${c}`)}`),
     `entwin:wa:creds:${sha24(email)}`,
     `entwin:wa:keys:${sha24(email)}`,
     `entwin:wa:paircode:${sha24(email)}`,
   ]
+  return keys
+}
+
+/**
+ * Animatics Redis keys are NOT reconstructable from the email alone: the job and
+ * headshot keys are keyed by a random job id (entwin:animatics:job:<uuid>,
+ * entwin:animatics:headshot:<uuid>:<charId>). The only stable, email-derived
+ * anchor is the owner index (entwin:animatics:owner:<sha256(email).slice(0,24)>,
+ * see lib/animatics/store.ts), which points at the user's latest job id. So we
+ * resolve the job dynamically: read the owner index → load the job blob →
+ * enumerate its per-character headshot keys → return job blob + headshots +
+ * owner index for deletion. Best-effort: any read failure just yields fewer
+ * keys, never throws into the teardown.
+ */
+async function animaticsKeysForUser(email: string): Promise<string[]> {
+  if (!REDIS_ENABLED) return []
+  const ownerKey = `entwin:animatics:owner:${sha24(email)}`
+  const keys: string[] = [ownerKey]
+  try {
+    const jobId = await redisGet(ownerKey)
+    if (jobId) {
+      const jobKey = `entwin:animatics:job:${jobId}`
+      keys.push(jobKey)
+      // Load the job blob to enumerate its character headshot keys.
+      const raw = await redisGet(jobKey)
+      if (raw) {
+        try {
+          const job = JSON.parse(raw) as { characters?: { id: string }[] }
+          for (const c of job.characters || []) {
+            if (c?.id) keys.push(`entwin:animatics:headshot:${jobId}:${c.id}`)
+          }
+        } catch {
+          /* malformed blob — still delete the job + owner keys we already have */
+        }
+      }
+    }
+  } catch {
+    /* owner/job read failed — fall back to deleting just the owner index */
+  }
   return keys
 }
 
@@ -172,7 +228,7 @@ async function cancelInFlightRuns(userEmail: string): Promise<CancelResult> {
 // note_chunk -> memory_note. Leaf/reference tables (rollups, cost log,
 // sync_state, connector_state, sender_classification, whatsapp_* metadata) have
 // no inbound user-data FKs and can go anywhere. This list must cover EVERY table
-// with a user_email column — the schema currently has 18 such tables (see
+// with a user_email column — the schema currently has 19 such tables (see
 // supabase/migrations); missing one strands that user's data on teardown.
 const USER_TABLES = [
   // chat history (0020): message references session (cascade) -> delete first
@@ -245,9 +301,13 @@ export async function killTwin(userEmail: string): Promise<TeardownReport> {
     }
   }
 
-  // 2. Revoke every Redis credential (LLM key + all channel sessions/tokens).
+  // 2. Revoke every Redis credential (LLM key + all channel sessions/tokens)
+  // and delete every user-scoped Redis blob (LLM/profile/Gmail/Slack/Drive/
+  // WhatsApp credentials + the Animatics job, headshots, and owner index).
   try {
-    const keys = redisKeysForUser(userEmail)
+    const staticKeys = redisKeysForUser(userEmail)
+    const animaticsKeys = await animaticsKeysForUser(userEmail)
+    const keys = [...staticKeys, ...animaticsKeys]
     await redisDel(keys)
     report.redis = { deleted: true, keyCount: keys.length }
   } catch (e) {

@@ -16,11 +16,17 @@ the user's session email (never request input):
 derived memory/entities/rollups, the cost ledger, every connector's saved
 settings, and the sync bookkeeping.
 
-**Redis (Upstash) — every credential the user has:**
-the encrypted LLM API key (`entwin:llm:*`), both Gmail sessions
-(`entwin:gmail:*`), the Slack session (`entwin:slack:*`), and the WhatsApp
-creds/keys/paircode (`entwin:wa:*`). Keys are hashed, so they're reconstructed
-from the email + known card ids — the schemes are mirrored from the channel
+**Redis (Upstash) — every credential and blob the user has:**
+the encrypted LLM API key (`entwin:llm:*`), the cached profile
+(`entwin:profile:*`), both Gmail sessions (`entwin:gmail:*`), the Slack session
+(`entwin:slack:*`), both Google Drive sessions (`entwin:drive:*`), the WhatsApp
+creds/keys/paircode (`entwin:wa:*`), and the Animatics pipeline state — the job
+blob (`entwin:animatics:job:*`), every character headshot
+(`entwin:animatics:headshot:*`), and the owner index (`entwin:animatics:owner:*`).
+Credential keys are hashed, so they're reconstructed from the email + known card
+ids. The Animatics job/headshot keys are keyed by a random job id, so they're
+resolved dynamically: the owner index (email-derived) points at the job, the job
+blob lists its headshots. The schemes are mirrored from the channel/animatics
 services and noted in `teardown.ts`.
 
 **Scheduled GitHub Actions services — decommissioned:**
