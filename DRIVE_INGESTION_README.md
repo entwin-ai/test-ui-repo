@@ -34,23 +34,35 @@ cross-channel entity graph and retrieval index as Gmail / Slack / WhatsApp.
 - `GET  /api/drive/authorize?card=drive-personal` — read-only OAuth handoff.
 - `GET  /api/drive/callback` — token exchange (existing route; now scope-aware).
 - `POST /api/drive/select-ingest` — save selected folder(s) as ingestion roots.
-- `POST /api/drive/ingest` — register `sync_state` + run first-connect / forced pass.
-- `POST /api/drive/scan-all` — **cron-only**, daily scan across due users.
+- `POST /api/drive/ingest` — register `sync_state` + **dispatch `drive-ingest.yml`**
+  (first-connect); in-process fallback if Actions aren't configured.
+- `POST /api/drive/scan-all` — **workflow/cron target**; runs the pipeline for
+  due (or scoped/forced) users.
 - `POST /api/drive/disconnect` — drop token + ledger + schedule for the card.
 
-## Scheduling (the daily scan)
+## Scheduling & jobs (GitHub Actions)
 
-Drive's pipeline lives in the **app**, not the `worker/`, so unlike the
-Gmail/Slack/WhatsApp crons (which run worker code) the Drive cron calls an app
-endpoint:
+Two workflows, both **visible in the Actions tab**:
 
-- `.github/workflows/drive-scan.yml` fires hourly and POSTs `/api/drive/scan-all`
-  with a shared `CRON_SECRET` bearer token.
-- The endpoint is a **heartbeat + per-user cadence gate**: it enumerates
-  `sync_state` rows with `channel='drive'` and runs a `daily-scan` for a user
-  only if their `pollHours` (from `connector_state.settings`) has elapsed since
-  `sync_state.last_delta_at` — the same model `delta.yml` uses for Gmail. One
-  schedule serves every user's own cadence.
+- **`drive-ingest.yml`** — *first-connect ingestion*. Dispatched by
+  `POST /api/drive/ingest` when the user finishes picking folders (the same way
+  Gmail's connect dispatches `calibrate.yml`). It reads every file in full →
+  one Memory Note per file (Read Me §1). Dispatch-only, scoped per user.
+- **`drive-scan.yml`** — *recurring daily scan*. Fires hourly on a cron and runs
+  the diff-based scan for any user whose `pollHours` has elapsed.
+
+Both are thin, visible triggers that POST the app's `/api/drive/scan-all`
+endpoint (Drive's pipeline lives in the app, not `worker/`, so the workflow
+calls back into the app rather than running worker code). `scan-all` is a
+**heartbeat + per-user cadence gate**: it enumerates `sync_state` rows with
+`channel='drive'` and runs each due user. A `first-connect` / `forced-refresh`
+dispatch bypasses the cadence gate (runs immediately); the plain cron tick
+honors each user's `pollHours`.
+
+**Fallback:** if `GH_REPO` / `GH_DISPATCH_TOKEN` are not configured (e.g. local
+dev with no Actions), `POST /api/drive/ingest` runs the pipeline in-process
+instead of dispatching, so the feature still works — the response says
+`ranInProcess: true` vs `dispatched: true`.
 
 ### Required config
 

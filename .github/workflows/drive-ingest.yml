@@ -1,0 +1,70 @@
+name: drive-ingest
+run-name: drive-ingest · entwin-user:${{ github.event.inputs.user_email }} · ${{ github.event.inputs.trigger || 'first-connect' }}
+
+# First-connection Google Drive ingestion (Google Drive Ingestion Read Me §1:
+# "every file in the selected folder is read in full … one initial Memory Note
+# per file"). Dispatched by POST /api/drive/ingest when the user finishes picking
+# their folder(s) — the equivalent of how Gmail's connect flow dispatches
+# calibrate.yml. This makes the first-connect pass a VISIBLE run in the Actions
+# tab (attributable per user via the run-name marker), instead of running inline
+# inside the connect request.
+#
+# WHY IT CALLS THE APP (not worker/): Drive's ingestion pipeline lives in the
+# Next.js app (lib/drive/ingest/*), unlike Gmail/Slack/WhatsApp whose workers run
+# worker/ code. So this workflow is a thin, visible trigger that POSTs the app's
+# /api/drive/scan-all endpoint scoped to the one user, with trigger=first-connect
+# (read every file in full) and the cadence gate bypassed. Same endpoint +
+# pipeline the daily drive-scan cron uses.
+#
+# This is dispatch-only (no schedule) — the recurring daily scan is drive-scan.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      user_email:
+        description: 'The user whose Drive to ingest (required).'
+        required: true
+      card_id:
+        description: 'drive-personal | drive-professional'
+        required: false
+        default: 'drive-personal'
+      trigger:
+        description: 'first-connect (read all) | forced-refresh (diff now)'
+        required: false
+        default: 'first-connect'
+
+concurrency:
+  # One in-flight ingest per user+card; a re-dispatch queues rather than racing.
+  group: drive-ingest-${{ github.event.inputs.user_email }}-${{ github.event.inputs.card_id }}
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Trigger first-connect Drive ingestion
+        env:
+          APP_URL: ${{ secrets.APP_BASE_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          USER_EMAIL: ${{ github.event.inputs.user_email }}
+          TRIGGER: ${{ github.event.inputs.trigger }}
+        run: |
+          if [ -z "$APP_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "APP_BASE_URL and CRON_SECRET must be set as repo secrets." >&2
+            exit 1
+          fi
+          if [ -z "$USER_EMAIL" ]; then
+            echo "user_email input is required." >&2
+            exit 1
+          fi
+          TRIG="${TRIGGER:-first-connect}"
+          BODY=$(jq -nc --arg u "$USER_EMAIL" --arg t "$TRIG" \
+            '{user_email: $u, trigger: $t, force: true}')
+
+          echo "POST $APP_URL/api/drive/scan-all  body=$BODY"
+          HTTP=$(curl -sS --fail-with-body \
+            -X POST "$APP_URL/api/drive/scan-all" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$BODY") || { echo "ingest call failed: $HTTP" >&2; exit 1; }
+          echo "$HTTP"

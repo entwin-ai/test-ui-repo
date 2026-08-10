@@ -193,6 +193,7 @@ interface Connector {
   driveIngestFolder?: string | null // human-readable path of the watched folder
   driveIngesting?: boolean // first-connect / forced-refresh pass in flight
   driveIngestDone?: boolean // a pass has completed at least once
+  driveDispatched?: boolean // the pass was dispatched as a GitHub Action (vs in-process)
   driveNotesWritten?: number // notes written by the last pass
   driveFilesIngested?: number // files ingested by the last pass
 }
@@ -1956,6 +1957,9 @@ function ConnectorsView({
             throw new Error(p.error || `folder save failed (${sel.status})`)
           }
           // Kick off first-connection ingestion (§1: read every file in full).
+          // With GitHub Actions configured this returns 202 + {dispatched:true}
+          // and the run appears in the Actions tab; without Actions it runs
+          // in-process and returns the completed report.
           const ing = await fetch('/api/drive/ingest', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1963,11 +1967,12 @@ function ConnectorsView({
           })
           const report = (await ing.json().catch(() => ({}))) as {
             ok?: boolean
+            dispatched?: boolean
             notesWritten?: number
             filesIngested?: number
             error?: string
           }
-          if (!ing.ok && !report.notesWritten) {
+          if (!ing.ok && !report.dispatched && !report.notesWritten) {
             throw new Error(report.error || `ingestion failed (${ing.status})`)
           }
           setConnectors((prev) =>
@@ -1977,12 +1982,20 @@ function ConnectorsView({
                     ...x,
                     driveIngesting: false,
                     driveIngestDone: true,
+                    // Dispatched runs don't have counts yet (they run in the
+                    // Actions tab); in-process runs report real numbers.
+                    driveDispatched: report.dispatched === true,
                     driveNotesWritten: report.notesWritten ?? 0,
                     driveFilesIngested: report.filesIngested ?? 0,
                   }
                 : x,
             ),
           )
+          if (report.dispatched) {
+            setDriveNotice(
+              'Drive ingestion started — it’s running as a background job (visible in your GitHub Actions tab). Notes will appear as it processes your files.',
+            )
+          }
         } catch (e) {
           setConnectors((prev) =>
             prev.map((x, i) => (i === idx ? { ...x, driveIngesting: false } : x)),

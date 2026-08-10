@@ -51,9 +51,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   }
 
-  const body = (await req.json().catch(() => ({}))) as { user_email?: string; force?: boolean }
+  const body = (await req.json().catch(() => ({}))) as {
+    user_email?: string
+    force?: boolean
+    trigger?: 'first-connect' | 'daily-scan' | 'forced-refresh'
+  }
   const scopedUser = typeof body.user_email === 'string' && body.user_email ? body.user_email : null
   const force = body.force === true
+  // Trigger passthrough: a first-connect dispatch reads every file in full and
+  // dates notes to each file's own modified date (Read Me §1); the cron default
+  // is a diff-based daily-scan. force is implied by a non-daily trigger.
+  const trigger: 'first-connect' | 'daily-scan' | 'forced-refresh' =
+    body.trigger === 'first-connect' || body.trigger === 'forced-refresh'
+      ? body.trigger
+      : 'daily-scan'
+  const forceGate = force || trigger !== 'daily-scan'
 
   const admin = getSupabaseAdmin()
 
@@ -88,7 +100,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Per-user cadence gate: pollHours from that user's card settings.
-    if (!force) {
+    if (!forceGate) {
       const state = await getConnectorState(userEmail, card).catch(() => null)
       const pollHours = state?.settings?.pollHours ?? 24
       const last = row.last_delta_at ? new Date(row.last_delta_at as string).getTime() : 0
@@ -111,8 +123,8 @@ export async function POST(req: NextRequest) {
         userEmail,
         cardId: card,
         folderIds: folders.map((f) => f.id),
-        trigger: 'daily-scan',
-        maxFiles: 500,
+        trigger,
+        maxFiles: trigger === 'first-connect' ? 1000 : 500,
       })
       // Stamp the cadence anchor on a successful (or partial) run so the next
       // tick measures from here.

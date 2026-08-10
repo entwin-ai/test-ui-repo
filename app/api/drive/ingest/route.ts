@@ -2,26 +2,35 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireUser, isDriveIngestCard } from '@/lib/drive/route-helpers'
 import { getIngestFolders } from '@/lib/drive/service'
 import { getSupabaseAdmin } from '@/lib/rag/supabase'
+import { dispatchWorkflow } from '@/lib/gmail/dispatch'
 import { runDriveIngest } from '@/lib/drive/ingest/pipeline'
 import type { ScanTrigger } from '@/lib/drive/ingest/rules'
 
 export const dynamic = 'force-dynamic'
-// Ingestion reads + LLM-summarizes files; give it room beyond the default.
+// Only the in-process FALLBACK path (no GH Actions configured) does heavy work;
+// the normal path just dispatches a workflow and returns fast. Keep headroom.
 export const maxDuration = 300
 
 /**
- * POST /api/drive/ingest  { card: "drive-personal", trigger?: "first-connect" | "daily-scan" | "forced-refresh" }
+ * POST /api/drive/ingest  { card: "drive-personal", trigger?: "first-connect" | "forced-refresh" }
  *
  * Called by the UI after the user connects a Drive-ingest card and picks the
- * folder(s) to watch. It:
- *   1. Registers/ensures a sync_state row for (user_email, card) so the daily
- *      GitHub Actions scan can enumerate this account — the same mechanism Gmail
- *      uses (Redis token keys are hashed and not reversible to user+card).
- *   2. Runs the ingestion pipeline in-process for the selected folders: read →
- *      diff → extract → vision → synthesize Memory Notes → resolve entities →
- *      persist (Read Me §1–§4). For a large vault the daily worker takes over on
- *      cadence; this first pass covers the "first connection: read every file"
- *      requirement (§1).
+ * folder(s) to watch. Like Gmail's connect flow (which dispatches calibrate.yml),
+ * this now DISPATCHES A GITHUB ACTION so the first-connect ingestion is a
+ * visible run in the Actions tab rather than blocking the request:
+ *
+ *   1. Registers/ensures a sync_state row for (user_email, card) — channel='drive'
+ *      — so the dispatched job (and the daily-scan cron) can enumerate this
+ *      account.
+ *   2. Dispatches drive-ingest.yml scoped to this user. That workflow calls the
+ *      app's /api/drive/scan-all endpoint (trigger=first-connect, force) which
+ *      runs the real pipeline: read every file in full -> Memory Notes (Read Me
+ *      §1). Drive's pipeline lives in the app, so the workflow is a thin visible
+ *      trigger — the same pattern drive-scan.yml uses for the daily scan.
+ *
+ * FALLBACK: if GH_REPO / GH_DISPATCH_TOKEN aren't configured (e.g. local dev with
+ * no Actions), we run the pipeline in-process so the feature still works, and say
+ * so in the response.
  *
  * The user_email is taken from the session — never from the body — so a user can
  * only ever ingest their own Drive.
@@ -36,11 +45,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid or missing Drive ingest card id' }, { status: 400 })
   }
   const trigger: ScanTrigger =
-    body?.trigger === 'forced-refresh'
-      ? 'forced-refresh'
-      : body?.trigger === 'daily-scan'
-        ? 'daily-scan'
-        : 'first-connect'
+    body?.trigger === 'forced-refresh' ? 'forced-refresh' : 'first-connect'
 
   // Must have at least one selected folder (Read Me §1 Scope — only selected
   // folders are ever read).
@@ -55,14 +60,13 @@ export async function POST(req: NextRequest) {
   // 1. Ensure the sync_state row (idempotent). Drive has no sender-calibration
   //    step, so onboarding goes straight to 'confirmed' — there is no Kanban
   //    handshake for Drive. channel='drive' keeps these rows out of the Gmail
-  //    delta cron's sweep (which filters channel='gmail') and lets the Drive
-  //    daily-scan cron find them.
+  //    delta cron's sweep and lets the Drive jobs find them.
   const { error: upErr } = await getSupabaseAdmin().from('sync_state').upsert(
     {
       user_email: auth.email,
       card_id: card,
       channel: 'drive',
-      backfill_done: trigger === 'first-connect' ? false : true,
+      backfill_done: false,
       onboard_phase: 'confirmed',
     },
     { onConflict: 'user_email,card_id' },
@@ -71,23 +75,39 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `sync_state: ${upErr.message}` }, { status: 500 })
   }
 
-  // 2. Run the pipeline for the selected folders.
+  // 2. Dispatch the visible GitHub Action (preferred path).
+  const ghConfigured = Boolean(process.env.GH_REPO && process.env.GH_DISPATCH_TOKEN)
+  if (ghConfigured) {
+    const dispatch = await dispatchWorkflow('drive-ingest.yml', {
+      user_email: auth.email,
+      card_id: card,
+      trigger,
+    })
+    if (!dispatch.ok) {
+      return NextResponse.json(
+        { error: 'dispatch failed', detail: dispatch.detail },
+        { status: 502 },
+      )
+    }
+    // 202 Accepted: the run is queued and will appear in the Actions tab. The
+    // job stamps sync_state.last_delta_at when it finishes.
+    return NextResponse.json(
+      { status: 'ingestion queued', dispatched: true, workflow: 'drive-ingest.yml' },
+      { status: 202 },
+    )
+  }
+
+  // 2b. FALLBACK — no Actions configured: run the pipeline in-process so the
+  //     feature still works locally.
   try {
     const report = await runDriveIngest({
       userEmail: auth.email,
       cardId: card,
       folderIds: folders.map((f) => f.id),
       trigger,
-      // First pass is bounded so the request returns; the daily worker (or a
-      // repeat forced refresh) continues any remainder on cadence.
       maxFiles: trigger === 'first-connect' ? 200 : 500,
     })
-
-    // Mark the backfill done once a first-connect pass completes without a hard
-    // failure, so the daily scan takes over in diff mode from here. Stamp
-    // last_delta_at too — it's the per-user cadence anchor the daily-scan cron
-    // compares against pollHours to decide if a user is "due".
-    if (trigger === 'first-connect' && report.ok) {
+    if (report.ok) {
       await getSupabaseAdmin()
         .from('sync_state')
         .update({
@@ -98,8 +118,10 @@ export async function POST(req: NextRequest) {
         .eq('user_email', auth.email)
         .eq('card_id', card)
     }
-
-    return NextResponse.json(report, { status: report.ok ? 200 : 207 })
+    return NextResponse.json(
+      { ...report, dispatched: false, ranInProcess: true },
+      { status: report.ok ? 200 : 207 },
+    )
   } catch (e) {
     return NextResponse.json({ ok: false, error: (e as Error).message }, { status: 500 })
   }
