@@ -271,40 +271,51 @@ export async function persistNote(
   const facetTag = input.facet ? input.facet.replace(/[^a-z0-9]+/gi, '-') : 'file'
   const noteIdText = `${input.noteDate}-drive-${input.driveFileId.slice(0, 12)}-${facetTag}-${input.seq}`
 
+  // Upsert (not insert) on the (user_email, note_id) unique key so a re-scan of
+  // the same file is IDEMPOTENT: the deterministic note_id means re-running the
+  // pipeline updates the existing note with a fresh summary/entities instead of
+  // erroring on a duplicate-key violation. This is what makes the diff-based
+  // daily scan and repeated forced refreshes safe to run.
   const { data: noteRow, error: noteErr } = await admin
     .from('memory_note')
-    .insert({
-      user_email: userEmail,
-      card_id: input.cardId,
-      note_id: noteIdText,
-      // gmail_msg_id is nullable since 0006 (WhatsApp/Slack/Drive notes aren't
-      // email). It MUST be null, not '' — there is a unique (user_email,
-      // gmail_msg_id) index, and '' would collide across every Drive note,
-      // whereas SQL NULLs are distinct. source_ref carries the native id.
-      gmail_msg_id: null,
-      source_ref: input.driveFileId,
-      source: 'drive',
-      note_date: input.noteDate,
-      name: note.name,
-      raw_summary: note.summary,
-      urgency: note.urgency,
-      life_domain: note.lifeDomain,
-      action: note.action,
-      confidentiality: note.confidentiality,
-      related_entities: relatedEntities, // never blank at ingestion (§2)
-      source_url: input.sourceUrl || null,
-      drive_file_id: input.driveFileId,
-      drive_facet: input.facet,
-      drive_note_kind: input.granularity,
-    })
+    .upsert(
+      {
+        user_email: userEmail,
+        card_id: input.cardId,
+        note_id: noteIdText,
+        // gmail_msg_id is nullable since 0006 (WhatsApp/Slack/Drive notes aren't
+        // email). It MUST be null, not '' — there is a unique (user_email,
+        // gmail_msg_id) index, and '' would collide across every Drive note,
+        // whereas SQL NULLs are distinct. source_ref carries the native id.
+        gmail_msg_id: null,
+        source_ref: input.driveFileId,
+        source: 'drive',
+        note_date: input.noteDate,
+        name: note.name,
+        raw_summary: note.summary,
+        urgency: note.urgency,
+        life_domain: note.lifeDomain,
+        action: note.action,
+        confidentiality: note.confidentiality,
+        related_entities: relatedEntities, // never blank at ingestion (§2)
+        source_url: input.sourceUrl || null,
+        drive_file_id: input.driveFileId,
+        drive_facet: input.facet,
+        drive_note_kind: input.granularity,
+      },
+      { onConflict: 'user_email,note_id' },
+    )
     .select('id')
     .single()
-  if (noteErr || !noteRow) throw new Error(`memory_note insert: ${noteErr?.message}`)
+  if (noteErr || !noteRow) throw new Error(`memory_note upsert: ${noteErr?.message}`)
   const noteId = noteRow.id as string
 
   // note_chunk + embedding (retrieval index). One chunk for the summary is
   // enough at gist level; the original file is the source of truth for detail.
+  // Clear any prior chunk for this note first so a re-scan doesn't accumulate
+  // stale duplicates.
   try {
+    await admin.from('note_chunk').delete().eq('user_email', userEmail).eq('note_id', noteId)
     const embedding = await provider.embed(`${note.name}\n\n${note.summary}`)
     await admin.from('note_chunk').insert({
       user_email: userEmail,
