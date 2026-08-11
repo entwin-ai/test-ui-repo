@@ -387,6 +387,18 @@ async function upsertLedger(
     .eq('file_id', file.id)
     .maybeSingle()
 
+  // Verbatim extracted text, persisted for query-time hydration (migration
+  // 0024). We join the per-facet units with a small header so the hydrator can
+  // present which tab/page/slide a passage came from. Capped so a huge file
+  // can't bloat the ledger row; the hydrator only ever shows a windowed excerpt
+  // anyway, and neighboring note_chunk rows remain the fallback.
+  const DRIVE_EXTRACTED_TEXT_CAP = 200_000 // chars (~50k tokens); generous, prevents row bloat
+  const extractedText =
+    extracted.units
+      .map((u) => (u.facet ? `[${u.facet}]\n${u.bodyText}` : u.bodyText))
+      .join('\n\n')
+      .slice(0, DRIVE_EXTRACTED_TEXT_CAP) || null
+
   await admin.from('drive_file').upsert(
     {
       user_email: a.userEmail,
@@ -399,6 +411,7 @@ async function upsertLedger(
       drive_version: file.version ?? null,
       md5_checksum: file.md5Checksum ?? null,
       content_hash: contentHash,
+      extracted_text: extractedText,
       last_ingested_at: new Date().toISOString(),
       last_note_date: wroteNote ? noteDate : (existing ? undefined : null),
       note_count: (existing?.note_count ?? 0) + (wroteNote ? noteCount : 0),
