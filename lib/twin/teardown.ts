@@ -228,7 +228,7 @@ async function cancelInFlightRuns(userEmail: string): Promise<CancelResult> {
 // note_chunk -> memory_note. Leaf/reference tables (rollups, cost log,
 // sync_state, connector_state, sender_classification, whatsapp_* metadata) have
 // no inbound user-data FKs and can go anywhere. This list must cover EVERY table
-// with a user_email column — the schema currently has 19 such tables (see
+// with a user_email column — the schema currently has 21 such tables (see
 // supabase/migrations); missing one strands that user's data on teardown.
 const USER_TABLES = [
   // chat history (0020): message references session (cascade) -> delete first
@@ -247,6 +247,8 @@ const USER_TABLES = [
   'entity',
   // per-user classification + connector/sync/cost state (no inbound FKs)
   'sender_classification',
+  'slack_entity',
+  'slack_classification',
   'whatsapp_entity',
   'whatsapp_classification',
   'whatsapp_capability_probe',
