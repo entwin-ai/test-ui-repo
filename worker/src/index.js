@@ -14,7 +14,7 @@ import { ingestMessage } from './pipeline/ingest.js';
 import { appendRollup, hhmm } from './pipeline/ingest.js';
 import { classify } from './lib/classify.js';
 import { ingestWhatsappBackfill, ingestWhatsappDelta, reprocessEntityAsImportant } from './pipeline/whatsapp.js';
-import { captureWhatsapp } from './pipeline/whatsapp-capture.js';
+import { captureWhatsapp, backfillSenderNames } from './pipeline/whatsapp-capture.js';
 import { probeWhatsapp } from './pipeline/whatsapp-probe.js';
 import { getSlackSession } from './lib/redis-slack.js';
 import {
@@ -317,6 +317,11 @@ async function main() {
         const { captured, notPaired } = await captureWhatsapp(acct);
         if (notPaired) continue; // needs one-time pairing first
         console.log(`[${acct.user_email}/wa] captured ${captured} new rows`);
+
+        // 1b. NAME BACKFILL: rewrite any masked/numeric sender_name & chat_name
+        //     on existing rows using the display names capture just resolved
+        //     onto whatsapp_entity. Best-effort; never fails the sync.
+        await backfillSenderNames(acct);
 
         // 2. VECTORIZE: turn unprocessed rows into notes/entities/embeddings.
         //    First run does the 1-month backfill; later runs do delta. Both only

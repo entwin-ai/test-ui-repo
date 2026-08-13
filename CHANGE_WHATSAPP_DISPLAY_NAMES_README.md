@@ -72,9 +72,41 @@ apply.
   automatically on their next processing pass once `display_name` is populated;
   already-written note text is not rewritten retroactively (the label field is).
 
-## Verify
+## Follow-up — masked numbers in `sender_name`, and backfilling the column
 
-- `node --check` clean on all four changed files.
-- 7 behavioral assertions pass: pushName harvest, numeric-name rejection,
-  saved-name-beats-pushName precedence (both registries), and pushName-only
-  person persisted.
+Symptom: `whatsapp_message.sender_name` showed `Me` for the user's own messages
+and a WhatsApp privacy-masked number (e.g. `+1∙∙∙∙∙∙∙∙64`) for everyone else —
+no real names.
+
+Root cause: that dotted string is **WhatsApp's own mask** for a contact you
+have not saved (bullet-operator U+2219, sometimes `•`/`·`/`…`/ASCII dots). It
+arrives as the contact's `notify`/`name` and was being stored verbatim, because
+the earlier name-rejection only caught *plain digit* strings, not masked ones —
+so the mask was treated as a valid name and blocked the real pushName.
+
+Fixes:
+- **Mask-aware rejection** in `wa-names.js` and `wa-entities.js`: a candidate
+  whose only glyphs are digits, spaces, `+`, and mask characters
+  (`\u2219 \u2022 \u00b7 \u2026 .`) is never accepted as a display name. Real
+  names that merely contain a dot (`A. Sharma`, `J.R.`) are kept — the test
+  requires the string to be *entirely* number+mask glyphs. Because masks are now
+  rejected at the cleaner, a later real pushName is no longer blocked by an
+  earlier masked contact event.
+- **Column backfill** — new `backfillSenderNames(acct)` in
+  `whatsapp-capture.js`, called from the `whatsapp-sync` mode right after
+  capture. It rewrites any 1:1 row whose `sender_name` / `chat_name` is still a
+  bare/masked number, using the real `display_name` capture resolved onto
+  `whatsapp_entity`. Incoming 1:1 `sender_name` and the `chat_name` both become
+  the contact's name; `from_me` rows keep `Me`; groups are untouched.
+
+Limit (unchanged reality): if a contact is unsaved AND has never sent a message
+carrying a pushName AND isn't a business with a verifiedName, WhatsApp gives no
+name for that number at all — there is nothing to backfill and it stays a number.
+Saving the contact on the phone, or receiving one message from them, makes the
+name available on the next sync.
+
+Verify: `node --check` clean on all changed files; 6 registry assertions
+(including the exact `+1∙∙∙∙∙∙∙∙64` mask, bullet/ellipsis variants, real-name
+override, and the dot-name false-positive guard) and an 8-case predicate check
+for the backfill selector all pass.
+

@@ -186,8 +186,10 @@ export function createEntityRegistry() {
     if (typeof s !== 'string') return null;
     const t = s.trim();
     if (!t.length) return null;
-    // A bare phone number is not a display name — never store it as one.
-    if (/^\+?\d[\d\s()\-]{4,}$/.test(t)) return null;
+    // A bare phone number OR WhatsApp's privacy-masked number (e.g.
+    // "+1∙∙∙∙∙∙∙∙64", "+44 •••• 22", "+1…07") is not a display name — never
+    // store it as one. Mask glyphs: U+2219, U+2022, U+00B7, U+2026, ASCII dot.
+    if (/\d/.test(t) && /^\+?[\d\s()\-\u2219\u2022\u00b7\u2026.]{4,}$/.test(t)) return null;
     return t;
   }
 

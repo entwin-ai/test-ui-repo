@@ -21,10 +21,21 @@ function jidToPhone(jid) {
 // A display candidate that is just the phone number (with or without the +) is
 // NOT a human name — WhatsApp shows those only when it has nothing better, and
 // persisting them is exactly the "weird looking phone number" we want to avoid.
-// Reject them as name candidates so a real pushName/notify can win instead.
+// This ALSO catches WhatsApp's own privacy-masked form for an unsaved contact,
+// e.g. "+1∙∙∙∙∙∙∙∙64" / "+1 •••••• 64" / "+44…22": a string whose only visible
+// glyphs are digits, spaces, a leading +, and mask characters (bullet operator
+// U+2219, bullet U+2022, middle dot U+00B7, ellipsis U+2026, or ASCII dots).
+// None of these is a real name, so we reject them all and let a genuine
+// pushName / contact name win instead.
+const MASK_CHARS = '\\u2219\\u2022\\u00b7\\u2026.';
+const PHONE_OR_MASK_RE = new RegExp(`^\\+?[\\d\\s()\\-${MASK_CHARS}]{4,}$`);
 function looksLikePhone(s) {
   if (typeof s !== 'string') return false;
-  return /^\+?\d[\d\s()\-]{4,}$/.test(s.trim());
+  const t = s.trim();
+  if (!t) return false;
+  // Must contain at least one digit and, apart from separators/mask glyphs,
+  // nothing else — a real name has letters, which fail this test.
+  return /\d/.test(t) && PHONE_OR_MASK_RE.test(t);
 }
 
 export function createNameRegistry() {

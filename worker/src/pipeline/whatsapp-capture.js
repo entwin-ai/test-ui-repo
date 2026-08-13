@@ -172,6 +172,84 @@ async function persistEntities(rows) {
   return rows.length;
 }
 
+// A stored label that is really a bare or WhatsApp-masked phone number, so it
+// should be replaced by a resolved display name if one exists. Mask glyphs:
+// U+2219 (∙), U+2022 (•), U+00B7 (·), U+2026 (…), ASCII dot.
+function isPhoneOrMaskLabel(s) {
+  if (typeof s !== 'string') return false;
+  const t = s.trim();
+  if (!t) return true; // empty is also "no real name"
+  return /\d/.test(t) && /^\+?[\d\s()\-\u2219\u2022\u00b7\u2026.]{4,}$/.test(t);
+}
+
+// Backfill whatsapp_message.sender_name / chat_name for a user's PERSON (1:1)
+// rows whose stored label is a bare/masked phone, using the display_name we've
+// resolved onto whatsapp_entity (from the contact name / pushName the user
+// actually sees). Groups are left alone — their chat_name is the subject and
+// their sender_name is the participant name, both handled at capture. Runs after
+// capture so the entity table already holds this run's freshly harvested names.
+// Best-effort: any failure is logged and swallowed so it never fails the sync.
+export async function backfillSenderNames(acct) {
+  const { user_email } = acct;
+  try {
+    // Load every person entity that HAS a real (non-masked) display name.
+    const { data: ents, error: entErr } = await admin
+      .from('whatsapp_entity')
+      .select('identity_key, display_name')
+      .eq('user_email', user_email)
+      .eq('wa_entity_type', 'person')
+      .not('display_name', 'is', null);
+    if (entErr) throw new Error(entErr.message);
+
+    const nameByPhone = new Map();
+    for (const e of ents || []) {
+      if (e.display_name && !isPhoneOrMaskLabel(e.display_name)) {
+        nameByPhone.set(e.identity_key, e.display_name); // identity_key is +phone
+      }
+    }
+    if (nameByPhone.size === 0) return 0;
+
+    // Pull 1:1 rows for this user that still carry a masked/numeric sender_name
+    // or chat_name, so we only rewrite what's actually wrong.
+    const { data: rows, error: rowErr } = await admin
+      .from('whatsapp_message')
+      .select('id, chat_id, sender, sender_name, chat_name, from_me, is_group')
+      .eq('user_email', user_email)
+      .or('is_group.is.null,is_group.eq.false');
+    if (rowErr) throw new Error(rowErr.message);
+
+    const updates = [];
+    for (const r of rows || []) {
+      if (r.is_group === true) continue;
+      const chatPhone = personPhone(r.chat_id);
+      const name = chatPhone ? nameByPhone.get(chatPhone) : null;
+      if (!name) continue;
+
+      const patch = {};
+      // sender_name: for an INCOMING 1:1 message the sender IS the contact, so
+      // its name is the contact's name. from_me rows keep "Me".
+      if (!r.from_me && isPhoneOrMaskLabel(r.sender_name)) patch.sender_name = name;
+      // chat_name: the 1:1 chat is named after the contact.
+      if (isPhoneOrMaskLabel(r.chat_name)) patch.chat_name = name;
+
+      if (Object.keys(patch).length) updates.push({ id: r.id, patch });
+    }
+    if (updates.length === 0) return 0;
+
+    // Apply per-row (small volumes; keeps it simple and idempotent).
+    let n = 0;
+    for (const u of updates) {
+      const { error } = await admin.from('whatsapp_message').update(u.patch).eq('id', u.id);
+      if (!error) n += 1;
+    }
+    console.log(`[${user_email}/wa] backfilled ${n} sender/chat names from resolved contacts`);
+    return n;
+  } catch (e) {
+    console.error(`[${user_email}/wa] sender-name backfill failed:`, e.message);
+    return 0;
+  }
+}
+
 export async function captureWhatsapp(acct) {
   const userEmail = acct.user_email;
 
