@@ -345,20 +345,33 @@ function newClientId(): string {
   return 'chat-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10)
 }
 
+/** A historical conversation handed to ChatView so the user can pick it back up. */
+interface ResumeSession {
+  clientId: string
+  title: string
+  messages: ChatMsg[]
+  /** Bumped by the caller each time so the same session can be re-opened. */
+  nonce: number
+}
+
 function ChatView({
   currentModel,
   resetKey,
   onPersisted,
+  resumeSession,
 }: {
   currentModel: string
   resetKey: number
   onPersisted?: () => void
+  resumeSession?: ResumeSession | null
 }) {
   const GREETING =
     'Hi, I\u2019m Entwin. Ask me anything about your email \u2014 what\u2019s outstanding, who\u2019s waiting on you, upcoming payments or deadlines \u2014 and I\u2019ll answer from your vault.'
   const [messages, setMessages] = useState<ChatMsg[]>([{ role: 'assistant', text: GREETING }])
   const [value, setValue] = useState('')
   const [pending, setPending] = useState(false)
+  // Title of the conversation being continued, shown as a banner. Null for a fresh chat.
+  const [resumedTitle, setResumedTitle] = useState<string | null>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
@@ -368,9 +381,25 @@ function ChatView({
   useEffect(() => {
     if (resetKey > 0) {
       clientIdRef.current = newClientId()
+      setResumedTitle(null)
       setMessages([{ role: 'assistant', text: 'New chat started. What would you like to know?' }])
     }
   }, [resetKey])
+
+  // Load a historical conversation: reuse its clientId so new turns append to the
+  // same stored session, and render its messages so the user has full context.
+  useEffect(() => {
+    if (!resumeSession) return
+    clientIdRef.current = resumeSession.clientId
+    setResumedTitle(resumeSession.title)
+    setMessages(
+      resumeSession.messages.length > 0
+        ? resumeSession.messages
+        : [{ role: 'assistant', text: 'Continuing this chat. What would you like to know?' }],
+    )
+    setValue('')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeSession?.nonce])
 
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight
@@ -443,11 +472,36 @@ function ChatView({
 
   return (
     <>
+      {resumedTitle && (
+        <div className="chat-resume-banner">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 7v5l3 2" />
+          </svg>
+          <span>
+            Continuing <strong>{resumedTitle}</strong> \u2014 new messages are added to this conversation.
+          </span>
+        </div>
+      )}
       <div id="chat-messages" ref={listRef}>
         {messages.map((m, i) => (
           <div className={`msg ${m.role}`} key={i}>
             <div className="role-label">{m.role === 'user' ? 'You' : 'Entwin'}</div>
-            <div className="bubble" style={m.error ? { color: '#e53935' } : undefined}>{m.text}</div>
+            <div className="bubble" style={m.error ? { color: '#e53935' } : undefined}>
+              {m.role === 'assistant' && !m.error ? (
+                <MarkdownAnswer
+                  text={m.text}
+                  cite={(n) => {
+                    const s = m.sources?.find((x) => x.n === n)
+                    return s
+                      ? { url: s.url, label: `${s.date || 'email'}${s.urgency ? ` · ${s.urgency}` : ''}` }
+                      : undefined
+                  }}
+                />
+              ) : (
+                m.text
+              )}
+            </div>
             {m.sources && m.sources.length > 0 && (
               <div className="msg-sources" style={{ marginTop: 6, fontSize: 12, opacity: 0.8, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {m.sources.map((s) => (
@@ -3845,70 +3899,131 @@ function refLabel(s: WikiSource): string {
   return parts.join(' · ')
 }
 
-// Strip light markdown to plain, readable text (headings, bold, italics,
-// bullets, code fences, links) while keeping [n] citation markers intact.
-function stripMarkup(text: string): string {
-  return text
-    .replace(/```[\s\S]*?```/g, (m) => m.replace(/```/g, '').trim()) // code fences
-    .replace(/`([^`]+)`/g, '$1')                                     // inline code
-    .replace(/^#{1,6}\s+/gm, '')                                     // headings
-    .replace(/\*\*([^*]+)\*\*/g, '$1')                               // bold
-    .replace(/(^|[^*])\*([^*]+)\*/g, '$1$2')                         // italics
-    .replace(/^\s*[-*+]\s+/gm, '• ')                                 // bullets
-    .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '$1 ($2)')           // md links
-    .replace(/[ \t]+\n/g, '\n')
-    .trim()
+// ---------------------------------------------------------------------------
+// Lightweight Markdown → React renderer (dependency-free).
+//
+// The answer path deliberately preserves emphasis and structure now: the model
+// is instructed to lead with the most important item, bold the critical facts,
+// and format sets of items as bullet lists. Previously stripMarkup() deleted
+// all of that before render, so bold never reached the user. This renderer
+// keeps a safe subset — **bold**, *italic*, `code`, bullet/numbered lists, and
+// #/##/### headers — and threads inline [n] citations through as links.
+//
+// It is intentionally small and non-recursive: our answers are short prose +
+// lists, not arbitrary nested Markdown. Anything it doesn't recognise renders
+// as plain text, so it degrades gracefully.
+// ---------------------------------------------------------------------------
+type CiteLookup = (n: number) => { url: string | null; label: string } | undefined
+
+// Render a single line of inline Markdown (bold / italic / code) with [n]
+// citations woven in. Returns an array of React nodes.
+function renderInline(line: string, keyBase: string, cite?: CiteLookup): React.ReactNode[] {
+  const out: React.ReactNode[] = []
+  // Tokenise on the inline markers and citation refs in one pass. Order in the
+  // alternation matters: ** before *, so bold wins over italic.
+  const re = /(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(`([^`]+)`)|(\[(\d+)\])/g
+  let last = 0
+  let m: RegExpExecArray | null
+  let i = 0
+  while ((m = re.exec(line)) !== null) {
+    if (m.index > last) out.push(line.slice(last, m.index))
+    const key = `${keyBase}-i${i++}`
+    if (m[1]) {
+      out.push(<strong key={key}>{m[2]}</strong>)
+    } else if (m[3]) {
+      out.push(<em key={key}>{m[4]}</em>)
+    } else if (m[5]) {
+      out.push(<code key={key} className="memory-inline-code">{m[6]}</code>)
+    } else if (m[7]) {
+      const n = Number(m[8])
+      const src = cite?.(n)
+      if (src?.url) {
+        out.push(
+          <a key={key} className="memory-cite" href={src.url} target="_blank" rel="noopener noreferrer" title={src.label}>[{n}]</a>,
+        )
+      } else {
+        out.push(<sup key={key} className="memory-cite memory-cite-plain">[{n}]</sup>)
+      }
+    }
+    last = m.index + m[0].length
+  }
+  if (last < line.length) out.push(line.slice(last))
+  return out
+}
+
+// Full block-level renderer: splits into paragraphs, headers, and lists.
+function MarkdownAnswer({ text, cite }: { text: string; cite?: CiteLookup }) {
+  const clean = (text || '').replace(/```(\w+)?\n?/g, '').trim() // drop code fences, keep content
+  if (!clean) return <span className="memory-panel-loading">Nothing recorded yet.</span>
+
+  const blocks = clean.split(/\n{2,}/).map((b) => b.trim()).filter(Boolean)
+
+  return (
+    <>
+      {blocks.map((block, bi) => {
+        const lines = block.split(/\n/).map((l) => l.trimEnd()).filter(Boolean)
+
+        // Header block: a lone #/##/### line.
+        if (lines.length === 1) {
+          const h = lines[0].match(/^(#{1,3})\s+(.*)$/)
+          if (h) {
+            const level = h[1].length
+            const content = renderInline(h[2], `h${bi}`, cite)
+            if (level === 1) return <h3 className="memory-answer-h" key={bi}>{content}</h3>
+            if (level === 2) return <h4 className="memory-answer-h" key={bi}>{content}</h4>
+            return <h5 className="memory-answer-h" key={bi}>{content}</h5>
+          }
+        }
+
+        // Bulleted list: every line starts with -, *, or •.
+        const isBullet = lines.length > 0 && lines.every((l) => /^\s*[-*•]\s+/.test(l))
+        if (isBullet) {
+          return (
+            <ul className="memory-answer-list" key={bi}>
+              {lines.map((l, li) => (
+                <li key={li}>{renderInline(l.replace(/^\s*[-*•]\s+/, ''), `${bi}-${li}`, cite)}</li>
+              ))}
+            </ul>
+          )
+        }
+
+        // Numbered list: every line starts with "N.".
+        const isNumbered = lines.length > 0 && lines.every((l) => /^\s*\d+[.)]\s+/.test(l))
+        if (isNumbered) {
+          return (
+            <ol className="memory-answer-list" key={bi}>
+              {lines.map((l, li) => (
+                <li key={li}>{renderInline(l.replace(/^\s*\d+[.)]\s+/, ''), `${bi}-${li}`, cite)}</li>
+              ))}
+            </ol>
+          )
+        }
+
+        // Otherwise a paragraph. A leading bold-only line acts as a soft header.
+        return (
+          <p className="memory-answer-p" key={bi}>
+            {lines.map((l, li) => (
+              <span key={li}>
+                {renderInline(l, `${bi}-${li}`, cite)}
+                {li < lines.length - 1 ? <br /> : null}
+              </span>
+            ))}
+          </p>
+        )
+      })}
+    </>
+  )
 }
 
 // Renders answer as readable paragraphs; converts inline [n] into links that
 // open the matching reference in a new tab (or jump to it if it has no URL).
 function WikiAnswer({ answer, sources }: { answer: string; sources: WikiSource[] }) {
-  const clean = stripMarkup(answer)
   const byN = Object.fromEntries(sources.map((s) => [s.n, s]))
-  const paragraphs = clean.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean)
-
-  const renderWithCitations = (line: string, keyBase: string) => {
-    const out: React.ReactNode[] = []
-    const re = /\[(\d+)\]/g
-    let last = 0
-    let m: RegExpExecArray | null
-    let i = 0
-    while ((m = re.exec(line)) !== null) {
-      if (m.index > last) out.push(line.slice(last, m.index))
-      const n = Number(m[1])
-      const src = byN[n]
-      if (src?.url) {
-        out.push(
-          <a key={`${keyBase}-c${i}`} className="memory-cite" href={src.url} target="_blank" rel="noopener noreferrer" title={refLabel(src)}>[{n}]</a>
-        )
-      } else {
-        out.push(<sup key={`${keyBase}-c${i}`} className="memory-cite memory-cite-plain">[{n}]</sup>)
-      }
-      last = m.index + m[0].length
-      i++
-    }
-    if (last < line.length) out.push(line.slice(last))
-    return out
+  const cite: CiteLookup = (n) => {
+    const s = byN[n]
+    return s ? { url: s.url, label: refLabel(s) } : undefined
   }
-
-  if (!clean) return <span className="memory-panel-loading">Nothing recorded yet.</span>
-
-  return (
-    <>
-      {paragraphs.map((p, pi) => {
-        const lines = p.split(/\n/).filter(Boolean)
-        const isList = lines.every((l) => l.startsWith('• '))
-        if (isList) {
-          return (
-            <ul className="memory-answer-list" key={pi}>
-              {lines.map((l, li) => <li key={li}>{renderWithCitations(l.replace(/^•\s+/, ''), `${pi}-${li}`)}</li>)}
-            </ul>
-          )
-        }
-        return <p className="memory-answer-p" key={pi}>{renderWithCitations(p.replace(/\n/g, ' '), String(pi))}</p>
-      })}
-    </>
-  )
+  return <MarkdownAnswer text={answer} cite={cite} />
 }
 
 function MemoryGraph() {
@@ -4599,7 +4714,13 @@ function rangeSince(range: ChatDateRange, customStart: string): string | null {
   return null
 }
 
-function AllChatsView({ refreshKey }: { refreshKey: number }) {
+function AllChatsView({
+  refreshKey,
+  onContinue,
+}: {
+  refreshKey: number
+  onContinue?: (session: StoredChatSession) => void
+}) {
   const [query, setQuery] = useState('')
   const [range, setRange] = useState<ChatDateRange>('all')
   const [customStart, setCustomStart] = useState('')
@@ -4751,6 +4872,19 @@ function AllChatsView({ refreshKey }: { refreshKey: number }) {
 
                   {open && (
                     <div className="allchats-thread">
+                      {onContinue && (
+                        <div className="allchats-continue-row">
+                          <button
+                            className="allchats-continue-btn"
+                            onClick={() => onContinue(s)}
+                          >
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                            </svg>
+                            Continue this chat
+                          </button>
+                        </div>
+                      )}
                       {s.messages.map((m) => (
                         <div className={`msg ${m.role}`} key={m.id}>
                           <div className="role-label">
@@ -4824,6 +4958,22 @@ function AppShell() {
   const [view, setView] = useState<ViewKey>('chat')
   const [chatResetKey, setChatResetKey] = useState(0)
   const [allChatsRefresh, setAllChatsRefresh] = useState(0)
+  // A historical conversation the user chose to continue from "All chats".
+  const [resumeSession, setResumeSession] = useState<ResumeSession | null>(null)
+
+  // Load a stored conversation into the Chat tab and switch to it. Maps the
+  // persisted message shape to ChatView's ChatMsg shape and reuses the original
+  // clientId so replies append to the same session in the history store.
+  const continueChat = (s: StoredChatSession) => {
+    const msgs: ChatMsg[] = s.messages.map((m) => ({
+      role: m.role,
+      text: m.text,
+      sources: m.sources,
+      error: m.isError,
+    }))
+    setResumeSession({ clientId: s.clientId, title: s.title, messages: msgs, nonce: Date.now() })
+    setView('chat')
+  }
 
   // LLM label shown top-right on every tab. Reflects the user's configured
   // model, or prompts to set an API key when none is stored. Loaded on mount and
@@ -5358,7 +5508,7 @@ function AppShell() {
         </div>
 
         <div className="new-chat-wrap">
-          <button className="new-chat-btn" onClick={() => { setView('chat'); setChatResetKey((k) => k + 1) }}>
+          <button className="new-chat-btn" onClick={() => { setResumeSession(null); setView('chat'); setChatResetKey((k) => k + 1) }}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
             <span className="label">New chat</span>
           </button>
@@ -5421,13 +5571,13 @@ function AppShell() {
                 : 'No model connected — set an API key in Settings'
             }</div></div>
           </div>
-          {view === 'chat' && <ChatView currentModel={currentModel} resetKey={chatResetKey} onPersisted={() => setAllChatsRefresh((k) => k + 1)} />}
+          {view === 'chat' && <ChatView currentModel={currentModel} resetKey={chatResetKey} resumeSession={resumeSession} onPersisted={() => setAllChatsRefresh((k) => k + 1)} />}
         </div>
 
         {/* ALL CHATS */}
         <div className={`view${view === 'allchats' ? ' active' : ''}`} id="view-allchats">
           <div className="view-header">All chats<div className="sub">Every past Entwin conversation, searchable by text or date</div></div>
-          {view === 'allchats' && <AllChatsView refreshKey={allChatsRefresh} />}
+          {view === 'allchats' && <AllChatsView refreshKey={allChatsRefresh} onContinue={continueChat} />}
         </div>
 
         {/* CONNECTORS */}

@@ -1370,6 +1370,31 @@
   .memory-answer-list { margin: 0 0 11px; padding-left: 18px; }
   .memory-answer-list li { margin-bottom: 5px; }
 
+  /* markdown headers emitted by the answer (lead-with-key-point header) */
+  .memory-answer-h {
+    margin: 0 0 8px;
+    font-weight: 700;
+    line-height: 1.3;
+  }
+  h3.memory-answer-h { font-size: 1.02em; }
+  h4.memory-answer-h { font-size: 0.98em; }
+  h5.memory-answer-h { font-size: 0.94em; color: var(--text-muted); }
+
+  /* inline code inside answers */
+  .memory-inline-code {
+    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: 0.88em;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0 4px;
+  }
+
+  /* When an assistant bubble renders markdown, kill the trailing margin on the
+     final block so bubble padding stays tight. */
+  .msg.assistant .bubble > :last-child { margin-bottom: 0; }
+  .msg.assistant .bubble strong { font-weight: 700; }
+
   /* inline citation links */
   .memory-cite {
     color: var(--blue);
@@ -2217,3 +2242,39 @@
   color: var(--text-muted);
   font-weight: 400;
 }
+
+.allchats-continue-row {
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: 2px;
+}
+.allchats-continue-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 13px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.allchats-continue-btn:hover { background: var(--accent-dark); }
+.allchats-continue-btn svg { flex: none; }
+
+.chat-resume-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 9px 13px;
+  background: var(--accent-soft, rgba(99, 102, 241, 0.1));
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.chat-resume-banner svg { flex: none; color: var(--accent); }
+.chat-resume-banner strong { font-weight: 600; }
