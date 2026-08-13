@@ -18,27 +18,50 @@ function jidToPhone(jid) {
   return `+${user}`;
 }
 
+// A display candidate that is just the phone number (with or without the +) is
+// NOT a human name — WhatsApp shows those only when it has nothing better, and
+// persisting them is exactly the "weird looking phone number" we want to avoid.
+// Reject them as name candidates so a real pushName/notify can win instead.
+function looksLikePhone(s) {
+  if (typeof s !== 'string') return false;
+  return /^\+?\d[\d\s()\-]{4,}$/.test(s.trim());
+}
+
 export function createNameRegistry() {
-  const contactNames = new Map(); // jid -> display name
+  const contactNames = new Map(); // jid -> display name (never a bare number)
   const chatNames = new Map();    // chat jid -> label (group subject / 1:1 name)
+  // phone (e.g. +13125551234) -> best human display name seen this run, keyed
+  // the SAME way the entity identity key is derived. This is what lets the
+  // vectorize/memory-note layer swap a bare number for the name WhatsApp shows.
+  const phoneNames = new Map();
 
   const cleaner = (s) => {
     if (typeof s !== 'string') return null;
     const t = s.trim();
-    return t.length ? t : null;
+    if (!t.length) return null;
+    if (looksLikePhone(t)) return null; // a number is not a name
+    return t;
   };
+
+  function rememberPhoneName(jid, name) {
+    const phone = jidToPhone(jid);
+    if (!phone || !name) return;
+    if (!phoneNames.has(phone)) phoneNames.set(phone, name);
+  }
 
   function setContact(jid, ...candidates) {
     if (!jid) return;
     const next = candidates.map(cleaner).find(Boolean);
     if (!next) return;
     if (!contactNames.has(jid)) contactNames.set(jid, next);
+    rememberPhoneName(jid, next); // mirror onto the phone key for the note layer
   }
   function setChat(jid, ...candidates) {
     if (!jid) return;
     const next = candidates.map(cleaner).find(Boolean);
     if (!next) return;
     if (!chatNames.has(jid)) chatNames.set(jid, next);
+    if (!isJidGroup(jid)) rememberPhoneName(jid, next);
   }
 
   function ingestContacts(contacts) {
@@ -78,6 +101,20 @@ export function createNameRegistry() {
     return cleaner(m.pushName) || contactNames.get(sender) || jidToPhone(sender) || null;
   }
 
+  // Best human display name for a phone-keyed person (+<digits>), or null if the
+  // only thing we ever saw for them was the number itself. Used by the memory-
+  // note layer to replace a bare number with the name WhatsApp displays.
+  function resolveDisplayForPhone(phone) {
+    if (!phone) return null;
+    return phoneNames.get(phone) || null;
+  }
+
+  // Flat { phone -> name } snapshot for persistence into whatsapp_entity so the
+  // name survives across runs (later deltas don't re-see contact events).
+  function phoneNamePairs() {
+    return [...phoneNames.entries()];
+  }
+
   return {
     ingestContacts,
     ingestChats,
@@ -85,6 +122,8 @@ export function createNameRegistry() {
     ingestMessage,
     resolveChatName,
     resolveSenderName,
-    _sizes: () => ({ contacts: contactNames.size, chats: chatNames.size }),
+    resolveDisplayForPhone,
+    phoneNamePairs,
+    _sizes: () => ({ contacts: contactNames.size, chats: chatNames.size, phones: phoneNames.size }),
   };
 }

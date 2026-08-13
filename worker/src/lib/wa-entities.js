@@ -84,11 +84,26 @@ export function createEntityRegistry() {
   // Merge a partial into the record for identity_key, keeping the most
   // informative value: live fields (muted/archived) take the LATEST non-null,
   // structural fields (type/member_count) take any known value.
+  // Display-name source strength: a saved contact name beats a business
+  // verifiedName beats a pushName. Higher wins; a stronger name already recorded
+  // is never overwritten by a weaker one regardless of event arrival order.
+  const NAME_RANK = { contact: 3, verified: 2, push: 1 };
+
   function merge(identityKey, patch) {
     if (!identityKey) return;
     const cur = entities.get(identityKey) || { identity_key: identityKey };
+    const nameRank = patch.__name_rank;
+    delete patch.__name_rank;
     for (const [k, v] of Object.entries(patch)) {
       if (v === undefined || v === null) continue;
+      if (k === 'display_name') {
+        const incoming = nameRank || NAME_RANK.contact; // default: treat as strong
+        const held = cur.__name_rank || 0;
+        if (incoming < held) continue; // keep the stronger name we already have
+        cur.display_name = v;
+        cur.__name_rank = incoming;
+        continue;
+      }
       cur[k] = v; // last-writer-wins; events arrive newest-last within a run
     }
     entities.set(identityKey, cur);
@@ -170,7 +185,10 @@ export function createEntityRegistry() {
   function cleaner(s) {
     if (typeof s !== 'string') return null;
     const t = s.trim();
-    return t.length ? t : null;
+    if (!t.length) return null;
+    // A bare phone number is not a display name — never store it as one.
+    if (/^\+?\d[\d\s()\-]{4,}$/.test(t)) return null;
+    return t;
   }
 
   // --- contacts (contacts.upsert / history `contacts`) — username harvest -----
@@ -195,15 +213,41 @@ export function createEntityRegistry() {
         break;
       }
     }
-    if (!username) return;
+
+    // Persist the display name WhatsApp shows for this contact — the saved name
+    // if we have it, else the verifiedName (business), else notify (pushName).
+    // This runs even with NO username: an unsaved contact still has a name the
+    // user can see, and dropping it is exactly what left bare phone numbers in
+    // the memory notes. cleaner() rejects a bare-number "name" so we never store
+    // the phone as the display_name.
+    const savedName = cleaner(c.name);
+    const verifiedName = cleaner(c.verifiedName);
+    const pushName = cleaner(c.notify);
+    const displayName = savedName || verifiedName || pushName;
+    const nameRank = savedName ? 3 : verifiedName ? 2 : 1;
+    if (!username && !displayName) return; // nothing new to record
 
     merge(key, {
       wa_entity_type: 'person',
       chat_jid: jid,
-      display_name: cleaner(c.name) || cleaner(c.verifiedName) || cleaner(c.notify),
+      display_name: displayName,
+      __name_rank: displayName ? nameRank : undefined,
       wa_username: username,
-      username_is_durable: durable,
+      username_is_durable: username ? durable : null,
     });
+  }
+
+  // Record a pushName harvested off a message as the person's display name when
+  // no better contact/verified name has arrived. pushName is precisely the label
+  // WhatsApp renders for an unsaved incoming contact, so it's the right fallback
+  // to persist. cleaner() drops a numeric pushName.
+  function ingestPushName(jid, pushName) {
+    if (!jid || isJidGroup(jid)) return;
+    const key = identityKeyFor(jid, 'person');
+    if (!key) return;
+    const name = cleaner(pushName);
+    if (!name) return;
+    merge(key, { wa_entity_type: 'person', chat_jid: jid, display_name: name, __name_rank: 1 });
   }
 
   // Flat list for capture to upsert. Fills identity defaults and drops anything
@@ -250,6 +294,7 @@ export function createEntityRegistry() {
     ingestChatUpdate,
     ingestGroupMetadata,
     ingestContact,
+    ingestPushName,
     lookupByJid,
     toRows,
     _size: () => entities.size,

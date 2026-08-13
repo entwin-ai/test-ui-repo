@@ -31,6 +31,14 @@ const BACKFILL_DRAIN_MS = Number(process.env.WA_BACKFILL_DRAIN_MS || 300_000); /
 
 const isStatus = (jid) => jid === 'status@broadcast';
 
+// Phone identity key (+<digits>) for a person jid, matching wa-names.js /
+// wa-entities.js. Returns null for a group jid or anything non-numeric.
+function personPhone(jid) {
+  if (!jid || jid === 'me' || isJidGroup(jid)) return null;
+  const user = String(jid).split('@')[0].split(':')[0].split('.')[0];
+  return /^\d{6,15}$/.test(user) ? `+${user}` : null;
+}
+
 function extractText(m) {
   const msg = m.message;
   if (!msg) return '';
@@ -71,14 +79,36 @@ function toRow(userEmail, m, names, selfName, entityReg) {
   const waEntityType = meta?.wa_entity_type || (isGroup ? 'group' : 'person');
   const communityId = meta?.community_id || null;
 
+  // Chat label: for a 1:1 chat prefer the resolved human name (entity display
+  // name, then the name registry) over the bare phone the raw jid decays to.
+  // For a group the chat name is the subject, which resolveChatName already
+  // returns. The registry's resolveChatName still supplies the phone as a final
+  // fallback so a row is never nameless.
+  let chatName = names.resolveChatName(chatJid);
+  if (!isGroup) {
+    if (meta?.display_name) chatName = meta.display_name;
+    else {
+      const phoneName = names.resolveDisplayForPhone(personPhone(chatJid));
+      if (phoneName) chatName = phoneName;
+    }
+  }
+
+  // Sender label: for an incoming 1:1 sender prefer the resolved display name
+  // over the phone. from_me stays "me" via resolveSenderName.
+  let senderName = names.resolveSenderName(m, selfName);
+  if (!key.fromMe) {
+    const senderPhoneName = names.resolveDisplayForPhone(personPhone(senderJid));
+    if (senderPhoneName) senderName = senderPhoneName;
+  }
+
   return {
     user_email: userEmail,
     card_id: 'whatsapp',
     wa_msg_id: key.id,
     chat_id: chatJid,
-    chat_name: names.resolveChatName(chatJid),
+    chat_name: chatName,
     sender: senderJid,
-    sender_name: names.resolveSenderName(m, selfName),
+    sender_name: senderName,
     from_me: !!key.fromMe,
     msg_timestamp: new Date(tsMs).toISOString(),
     body: text,
@@ -192,6 +222,15 @@ export async function captureWhatsapp(acct) {
     const collect = (msgs) => {
       for (const m of msgs) {
         names.ingestMessage(m);
+        // Harvest the incoming pushName as a persistable display name for the
+        // sender (unsaved 1:1 contacts show up here and nowhere else). Groups
+        // are skipped inside ingestPushName — a participant's pushName is not
+        // the group's name.
+        const k = m?.key;
+        if (k && !k.fromMe && m.pushName) {
+          const senderJid = k.participant || k.remoteJid;
+          if (senderJid && !isJidGroup(senderJid)) entityReg.ingestPushName(senderJid, m.pushName);
+        }
         noteOldest(m);
         const row = toRow(userEmail, m, names, selfName, entityReg);
         if (row) buffer.push(row);
@@ -282,7 +321,7 @@ export async function captureWhatsapp(acct) {
       console.log(
         `[${userEmail}/wa] capture done (${reason}) — ${captured} rows, ` +
         `${oldest.size} chats, ${entitiesUpserted} entities, ` +
-        `names[contacts=${sizes.contacts},chats=${sizes.chats}]`
+        `names[contacts=${sizes.contacts},chats=${sizes.chats},phones=${sizes.phones}]`
       );
       resolve({ captured, entities: entitiesUpserted });
     };

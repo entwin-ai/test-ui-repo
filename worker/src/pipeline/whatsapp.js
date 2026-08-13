@@ -52,6 +52,33 @@ function dayOf(row) {
   return new Date(row.msg_timestamp).toISOString().slice(0, 10);
 }
 
+// True when a stored label is really just the phone number (the "weird looking
+// phone number" we want to stop surfacing), so we know to look for a real name.
+function isPhoneLabel(s) {
+  return typeof s === 'string' && /^\+?\d[\d\s()\-]{4,}$/.test(s.trim());
+}
+
+// Best human label for an entity-day. Prefers the display name persisted on
+// whatsapp_entity (harvested from the contact/pushName the user actually sees),
+// then a non-numeric chat/sender name off the row, and only falls back to the
+// bare phone/jid when nothing better exists. This upgrades BOTH freshly captured
+// rows and rows captured before the name harvest shipped.
+async function resolveEntityLabel(userEmail, anchorRow) {
+  const rowName = anchorRow.chat_name || anchorRow.sender_name;
+  if (rowName && !isPhoneLabel(rowName)) return rowName;
+
+  const identityKey = identityKeyForRow(anchorRow);
+  const { data: meta } = await admin
+    .from('whatsapp_entity')
+    .select('display_name')
+    .eq('user_email', userEmail)
+    .eq('identity_key', identityKey)
+    .maybeSingle();
+
+  if (meta?.display_name && !isPhoneLabel(meta.display_name)) return meta.display_name;
+  return rowName || anchorRow.chat_id;
+}
+
 // Update many message rows' processing state at once, stamping the resolved
 // tier. Resilient to a not-yet-reloaded schema cache (0017 wa_tier columns).
 async function markRowsProcessed(ids, patch) {
@@ -206,7 +233,7 @@ async function processEntityDay(acct, provider, { rows, tier, tierReason }) {
   const ids = rows.map((r) => r.id);
   const anchorRow = rows[rows.length - 1]; // day's last message (chronological)
   const noteDate = dayOf(anchorRow);
-  const chatName = anchorRow.chat_name || anchorRow.sender_name || anchorRow.chat_id;
+  const chatName = await resolveEntityLabel(user_email, anchorRow);
   const isGroup = isGroupJid(anchorRow.chat_id);
 
   // Ignore -> write nothing at all (Read Me §4). Mark the day's rows processed
